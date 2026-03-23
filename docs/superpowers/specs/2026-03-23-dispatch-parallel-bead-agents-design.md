@@ -18,37 +18,35 @@ beads-driven-development processes tasks one at a time: pick a task, implement, 
 
 ### Core Loop
 
-```
-Loop:
-  bd ready --json
-  ├─ No tasks ready + all closed → COMPLETION (see below)
-  ├─ No tasks ready + some open  → BLOCKED → report & pause
-  └─ Tasks available → BATCH SELECTION
+```mermaid
+flowchart TD
+    START([Loop start]) --> READY["bd ready --json"]
+    READY --> CHECK{Tasks available?}
+    CHECK -->|No tasks + all closed| COMPLETION
+    CHECK -->|No tasks + some open| BLOCKED["Report blocked tasks & pause"]
+    CHECK -->|Tasks available| PREFLIGHT
 
-  Pre-flight file overlap analysis on ready tasks
-  ├─ Group into non-overlapping lanes (max 3)
-  └─ Defer overlapping tasks to next batch
+    PREFLIGHT["Pre-flight file overlap analysis"] --> GROUP["Group into non-overlapping lanes\n(max 3, defer overlaps)"]
+    GROUP --> CLAIM["bd update <id> --claim\nper lane"]
+    CLAIM --> PARALLEL
 
-  For each lane (dispatched in parallel):
-    bd update <id> --claim
-    Implementer subagent → spec reviewer → code quality reviewer
-    (each lane is self-contained, handles its own review loops)
+    subgraph PARALLEL ["Parallel lane dispatch"]
+        direction LR
+        LANE1["Lane 1\nImplement → Spec review\n→ Code quality review"]
+        LANE2["Lane 2\nImplement → Spec review\n→ Code quality review"]
+        LANE3["Lane 3\nImplement → Spec review\n→ Code quality review"]
+    end
 
-  Wait for all lanes to complete
+    PARALLEL --> WAIT["Wait for all lanes"]
+    WAIT --> INTEGRATION["Post-flight integration review"]
+    INTEGRATION --> INTCHECK{Issues found?}
+    INTCHECK -->|Clean| CLOSE["Close beads in batch\nRe-sync TodoWrite"]
+    INTCHECK -->|Issues| FIX["Fix agent → re-review\n(max 3 iterations)"]
+    FIX --> INTCHECK
+    CLOSE --> START
 
-  Post-flight integration review subagent
-  ├─ Clean → close all beads in batch, re-sync TodoWrite
-  └─ Issues → fix agent → re-review (max 3 iterations)
-
-  Loop back to bd ready
-
-Completion (after all tasks closed):
-  bd close <epic-id> --reason "All tasks completed"
-  Dispatch final code reviewer subagent for entire implementation
-    (reviews full diff from epic start to now — catches cross-batch inconsistencies)
-    If findings reported → fix and re-review (follows requesting-code-review skill flow)
-    This review is advisory since individual task reviews already passed
-  Invoke finishing-a-development-branch
+    COMPLETION["Close epic\nbd close <epic-id>"] --> FINALREVIEW["Final code reviewer\n(full diff, advisory,\nfollows requesting-code-review flow)"]
+    FINALREVIEW --> FINISH([finishing-a-development-branch])
 ```
 
 Graceful degradation: when only 1 task is ready or all tasks share files, behavior is identical to sequential beads-driven-development.
@@ -149,14 +147,14 @@ Same strategy as beads-driven-development / subagent-driven-development:
 
 Before entering the execution loop, sync session state with beads (same as beads-driven-development):
 
-```
-bd list --parent <epic-id> --json
-  -> for each issue:
-      status=closed      -> TodoWrite: completed
-      status=in_progress -> TodoWrite: in_progress
-                            Ask user: "Task X was in progress. Continue or restart?"
-      status=blocked     -> TodoWrite: pending (annotate "blocked by <dep-id>")
-      status=open        -> TodoWrite: pending
+```mermaid
+flowchart TD
+    INIT["bd list --parent <epic-id> --json"] --> FOREACH["For each issue"]
+    FOREACH --> CLOSED{status?}
+    CLOSED -->|closed| TC["TodoWrite: completed"]
+    CLOSED -->|in_progress| TIP["TodoWrite: in_progress\nAsk user: continue or restart?"]
+    CLOSED -->|blocked| TB["TodoWrite: pending\n(annotate blocked by <dep-id>)"]
+    CLOSED -->|open| TO["TodoWrite: pending"]
 ```
 
 ## Error Handling
