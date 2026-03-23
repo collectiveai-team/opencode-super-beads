@@ -1963,7 +1963,7 @@ bd dep add <task-id> <blocker-id> --type blocks
 bd close <task-id> --reason "Already implemented"
 
 # Check what's blocked and why
-bd blocked
+bd list --status blocked
 
 # View project stats
 bd stats
@@ -2003,11 +2003,15 @@ opencode-super-beads/
 MIT
 ```
 
-- [ ] **Step 2: Commit**
+- [ ] **Step 2: Create LICENSE file**
+
+Create `LICENSE` with MIT license text (use the standard MIT template with current year and project author).
+
+- [ ] **Step 3: Commit**
 
 ```bash
-git add README.md
-git commit -m "docs: add README with installation guide and usage instructions"
+git add README.md LICENSE
+git commit -m "docs: add README with installation guide and MIT license"
 ```
 
 ### Task 13: Final Verification
