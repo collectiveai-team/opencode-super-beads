@@ -109,7 +109,7 @@ Batch selection is simple with worktree isolation — no file overlap analysis n
 
 1. Call `bd ready --json` to get all unblocked tasks.
 2. Take the first N tasks (up to MAX_LANES = 3).
-3. If only 1 task is ready, still create a worktree for consistency (or optionally skip worktree overhead and run in-place like sequential beads-driven-development).
+3. If only 1 task is ready, skip worktree overhead and run in-place (same behavior as sequential beads-driven-development).
 
 Since each lane has its own worktree, tasks that touch the same files can safely run in parallel. Conflicts are resolved at merge time.
 
