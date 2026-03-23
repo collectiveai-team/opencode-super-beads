@@ -55,7 +55,7 @@ The plugin's `chat.message` hook watches assistant messages for the plan-complet
 1. A path matching `docs/superpowers/plans/*.md` (or user-configured plan location)
 2. The phrase "ready to execute" (case-insensitive)
 
-Both must be present to avoid false positives.
+Both must be present (case-insensitive substring match) to avoid false positives.
 
 ### Injection
 
@@ -81,11 +81,22 @@ Plan detected. Choose an execution strategy:
 
 Before showing option 3, the hook runs `bd version`. If `bd` is not installed, option 3 is omitted and the injection degrades to the standard superpowers two-option handoff.
 
-### After user picks beads-driven
+### Choice detection
+
+The injected `<execution-options>` message is a `noReply` system message -- the LLM reads it and responds to the user. The user's next message (or the LLM's interpretation of it) determines the path. The hook watches the next assistant message for choice signals:
+
+- Contains "beads-driven" or "beads" + "execution" (case-insensitive substring) → beads path
+- Contains "subagent-driven" or references superpowers:subagent-driven-development → superpowers subagent path (plugin does nothing, superpowers handles it)
+- Contains "sequential" or "executing-plans" → superpowers sequential path (plugin does nothing)
+- No clear match → plugin does nothing (lets the conversation continue naturally)
+
+The hook only needs to detect the beads path. For the other two options, the existing superpowers skills handle execution without intervention.
+
+### After beads-driven is selected
 
 Two actions in sequence:
 1. Run the plan-to-beads converter
-2. Invoke the `beads-driven-development` skill
+2. Inject the `beads-driven-development` skill content as a follow-up system message, which instructs the LLM to begin the execution loop
 
 ## Plan-to-Beads Converter
 
@@ -159,7 +170,8 @@ Loop:
   |   +- No tasks ready + some open  -> BLOCKED -> report & pause
   |   +- Tasks available -> pick first ready task
   |
-  |   Read full task spec from plan file (using task-number reference)
+  |   Task in mapping? -> Read full task spec from plan file (using task-number reference)
+  |   Task NOT in mapping? -> Ad-hoc task: use bead description directly as task spec
   |
   |   bd update <id> --claim
   |   TodoWrite: mark in_progress
@@ -167,7 +179,7 @@ Loop:
   |   Dispatch implementer subagent
   |   +- DONE -> proceed to review
   |   +- DONE_WITH_CONCERNS -> read concerns, proceed to review
-  |   +- NEEDS_CONTEXT -> provide context, re-dispatch
+  |   +- NEEDS_CONTEXT -> provide context, re-dispatch (max 3 attempts, then escalate to user)
   |   +- BLOCKED -> bd update <id> --status blocked, continue loop
   |
   |   Dispatch spec reviewer subagent
@@ -238,7 +250,7 @@ bd list --parent <epic-id> --json
 | Task picked from `bd ready` | `bd update <id> --claim` | Mark `in_progress` |
 | Implementer returns BLOCKED | `bd update <id> --status blocked` | Mark `pending`, annotate reason |
 | Code review passes | `bd close <id> --reason "..."` | Mark `completed` |
-| All tasks in epic closed | Epic auto-closes or manual close | All items completed |
+| All tasks in epic closed | Plugin explicitly runs `bd close <epic-id>` | All items completed |
 | External blocker resolved | User ran `bd update`, status -> open | Detected on next `bd ready`, added back |
 
 ### Conflict resolution
@@ -262,6 +274,7 @@ TodoWrite re-syncs from `bd list` at the start of each loop iteration. If they d
 | Plan doesn't match expected structure | Abort conversion, show expected vs. found, suggest re-running writing-plans |
 | Plan has no `### Task` headings | Abort -- a plan with no tasks isn't executable |
 | Plan has tasks but no `## Chunk` headings | Treat all tasks as one chunk (no dependencies, all immediately ready) |
+| Empty chunk (heading with no tasks) | Ignored -- no issues created, no dependency edges |
 
 ### Execution loop failures
 
@@ -270,6 +283,7 @@ TodoWrite re-syncs from `bd list` at the start of each loop iteration. If they d
 | `bd ready` returns error | Retry once. If still failing, report and pause. |
 | `bd close` fails | Log error, continue. Code was completed; beads state can be fixed manually. |
 | Implementer returns BLOCKED | `bd update <id> --status blocked`, log reason, continue to next ready task. If nothing ready, report and pause. |
+| Implementer returns NEEDS_CONTEXT 3 times | Escalate to user: show what context was requested and what was provided. Let user supply missing context or skip task. |
 | Spec reviewer loops 3 times | Escalate to user: show concerns and attempts. Let user override or intervene. |
 | Session crash mid-task | On resume: detect in_progress task, ask user to continue or restart. |
 
