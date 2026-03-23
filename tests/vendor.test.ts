@@ -6,7 +6,7 @@ describe("vendor", () => {
     test("loads beads-driven-development skill content", async () => {
       const content = await loadSkill("beads-driven-development");
       expect(content).not.toBeNull();
-      expect(content).toContain("beads-driven-development");
+      expect(content).toContain("Beads-Driven Development");
     });
 
     test("returns null for non-existent skill", async () => {
