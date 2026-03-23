@@ -78,7 +78,7 @@ export type ExecutionChoice = "beads" | "subagent" | "sequential";
  * Detect which execution path the user/LLM chose from an assistant message.
  *
  * Detection rules (case-insensitive substring match):
- * - "beads-driven" OR ("beads" + "execution") -> "beads"
+ * - "beads-driven" OR "super-beads:beads-driven-development" OR ("beads" + "execution") -> "beads"
  * - "subagent-driven" OR "subagent-driven-development" -> "subagent"
  * - "sequential" OR "executing-plans" -> "sequential"
  * - No clear match -> null (let conversation continue naturally)
@@ -95,6 +95,7 @@ export function detectExecutionChoice(
 
   // Beads detection (highest priority)
   if (
+    lower.includes("super-beads:beads-driven-development") ||
     lower.includes("beads-driven") ||
     (lower.includes("beads") && lower.includes("execution"))
   ) {

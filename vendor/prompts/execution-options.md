@@ -10,10 +10,12 @@ Plan detected. Choose an execution strategy:
    Good for simpler plans or environments without subagent support.
 
 3. **Beads-driven development** (requires bd CLI)
-   Creates an epic + task issues in beads from the plan. Uses `bd ready` for
-   task selection (respects external blockers and manual reordering).
-   Subagent dispatch with two-stage review. Dual tracking: beads for
-   persistent state across sessions, TodoWrite for real-time session UI.
+    Creates an epic + task issues in beads from the plan. Uses `bd ready` for
+    task selection (respects external blockers and manual reordering).
+    Primary path: native skill `super-beads:beads-driven-development`.
+    Secondary path: manual alias `super-beads:execute`.
+    Subagent dispatch with two-stage review. Dual tracking: beads for
+    persistent state across sessions, TodoWrite for real-time session UI.
 
 Which approach would you like to use?
 </execution-options>

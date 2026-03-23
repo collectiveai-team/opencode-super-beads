@@ -310,10 +310,13 @@ opencode-super-beads/
 |   |   +-- handoff.ts         # chat.message hook: detect plan completion, inject options
 |   +-- converter/
 |   |   +-- plan-to-beads.ts   # Parse plan markdown -> bd create calls -> task mapping
-|   +-- vendor.ts              # Load skill + prompt files from vendor/
-+-- vendor/
+|   +-- vendor.ts              # Load bundled skill/prompt files and strip frontmatter for runtime use
 |   +-- skills/
-|   |   +-- beads-driven-development.md   # The execution skill content
+|       +-- install.ts         # Install bundled skills into OpenCode's native skill path
++-- skills/
+|   +-- beads-driven-development/
+|       +-- SKILL.md           # The execution skill content
++-- vendor/
 |   +-- prompts/
 |       +-- execution-options.md          # Handoff injection template
 +-- package.json
@@ -327,8 +330,9 @@ opencode-super-beads/
 | `plugin.ts` | Wire hooks + config. Export `Plugin` function. Check `bd` availability on init. |
 | `hooks/handoff.ts` | Pattern match plan completion, check `bd` exists, inject execution options. On beads selection, call converter then signal skill invocation. |
 | `converter/plan-to-beads.ts` | Pure function: plan file path -> parse markdown -> `bd create` commands -> wire dependencies -> return `taskNumber -> beadId` mapping. Handle idempotency. |
-| `vendor.ts` | Load markdown files from `vendor/` at startup. |
-| `beads-driven-development.md` | Skill content for the execution engine. References superpowers prompt templates by path. |
+| `vendor.ts` | Load bundled skill/prompt files at startup and strip frontmatter for runtime injection. |
+| `skills/beads-driven-development/SKILL.md` | Native OpenCode skill content for the execution engine. References superpowers prompt templates by path. |
+| `skills/install.ts` | Copy the bundled skill into `~/.config/opencode/skills/super-beads/` (or `OPENCODE_CONFIG_DIR`) on plugin startup. |
 | `execution-options.md` | Template for handoff injection message. Separated from code for easy editing. |
 
 ## Testing Strategy
