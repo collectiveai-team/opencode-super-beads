@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "opencode_super_beads",
+  "project_id": "0f61ccbc-57a9-4a07-8238-b7deb73a4138"
+}
