@@ -131,3 +131,37 @@ function extractFilesSection(taskContent: string): string {
   );
   return filesMatch?.[1]?.trim() ?? "";
 }
+
+/** A dependency edge: taskNumber depends on dependsOn */
+export interface DependencyEdge {
+  taskNumber: number;
+  dependsOn: number;
+}
+
+/**
+ * Build the dependency graph between tasks based on chunk ordering.
+ *
+ * Rules:
+ * - Tasks within the same chunk have NO dependencies (can run in parallel)
+ * - Tasks in chunk N+1 depend on ALL tasks in chunk N completing
+ * - Tasks do NOT transitively depend on earlier chunks (only the immediately previous chunk)
+ *
+ * @param chunks - Parsed chunks with their tasks
+ * @returns Array of dependency edges
+ */
+export function buildDependencyGraph(chunks: ParsedChunk[]): DependencyEdge[] {
+  const edges: DependencyEdge[] = [];
+
+  for (let i = 1; i < chunks.length; i++) {
+    const currentChunk = chunks[i]!;
+    const previousChunk = chunks[i - 1]!;
+
+    for (const task of currentChunk.tasks) {
+      for (const dep of previousChunk.tasks) {
+        edges.push({ taskNumber: task.number, dependsOn: dep.number });
+      }
+    }
+  }
+
+  return edges;
+}
