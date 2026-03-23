@@ -21,7 +21,7 @@ beads-driven-development processes tasks one at a time: pick a task, implement, 
 ```
 Loop:
   bd ready --json
-  ├─ No tasks ready + all closed → DONE → finishing-a-development-branch
+  ├─ No tasks ready + all closed → COMPLETION (see below)
   ├─ No tasks ready + some open  → BLOCKED → report & pause
   └─ Tasks available → BATCH SELECTION
 
@@ -41,6 +41,12 @@ Loop:
   └─ Issues → fix agent → re-review (max 3 iterations)
 
   Loop back to bd ready
+
+Completion (after all tasks closed):
+  bd close <epic-id> --reason "All tasks completed"
+  Dispatch final code reviewer subagent for entire implementation
+    (reviews full diff from epic start to now — catches cross-batch inconsistencies)
+  Invoke finishing-a-development-branch
 ```
 
 Graceful degradation: when only 1 task is ready or all tasks share files, behavior is identical to sequential beads-driven-development.
@@ -58,22 +64,44 @@ Before dispatching a batch, the orchestrator extracts target files from each tas
 
 **File extraction heuristic:** Look for file paths in the task spec text (patterns like `src/...`, `lib/...`, explicit "Files:" sections). If the plan uses a structured format with file lists per task, use those directly. If ambiguous, fall back to sequential for that task.
 
+### Task Spec Provisioning
+
+Before dispatching lanes, the orchestrator resolves each task's full text:
+
+1. Check if the bead ID exists in the task-number-to-bead-id mapping (from plan conversion).
+2. **If mapped:** Read the full task spec from the plan file using the task-number reference. Provide the complete text to the lane subagent.
+3. **If not mapped (ad-hoc task):** Use the bead description directly as the task spec.
+
+The orchestrator never makes lane subagents read the plan file. All task text is provided inline in the lane prompt.
+
 ### Lane Execution
 
-Each lane is dispatched as a single Task subagent. The lane prompt wraps the existing three-stage pipeline:
+Each lane is dispatched as a single Task subagent that runs the three-stage pipeline linearly within one prompt session. The lane subagent acts as a mini-orchestrator: it implements, then self-reviews against the spec, then reviews code quality — all within a single agent session. This is architecturally different from the sequential skill where the main orchestrator dispatches three separate subagents. Here, collapsing into one agent per lane enables true parallel execution.
 
-1. **Implement** using `implementer-prompt.md` template from subagent-driven-development.
-2. **Spec review** using `spec-reviewer-prompt.md` — up to 3 fix/re-review iterations.
-3. **Code quality review** using `code-quality-reviewer-prompt.md` — up to 3 iterations.
+The lane prompt provides:
+- Full task spec text (from provisioning above)
+- Context about where the task fits in the broader plan
+- The review criteria from `spec-reviewer-prompt.md` and `code-quality-reviewer-prompt.md`
+- Instructions to run all three stages sequentially within the session
+
+**NEEDS_CONTEXT handling within lanes:** When the implementer phase encounters ambiguity:
+- **Attempt 1-2:** The lane subagent attempts to self-resolve by reading relevant source files, tests, and documentation in the codebase. It has full file system access and should use it.
+- **Attempt 3:** If still unresolved, the lane returns NEEDS_CONTEXT to the orchestrator with a description of what it needs.
+- The orchestrator provides the requested context and re-dispatches the lane (resuming the same task, not starting over).
+- If NEEDS_CONTEXT returns 3 times from the orchestrator level, the lane is marked FAILED and escalated to the user.
 
 The lane subagent returns a structured report:
-- **Status:** DONE / BLOCKED / FAILED
+- **Status:** DONE / BLOCKED / FAILED / NEEDS_CONTEXT
 - **Files changed:** List of all modified/created files
 - **Test results:** Pass/fail summary
 - **Review summaries:** Spec review verdict, code quality verdict
 - **Concerns:** Any issues noted during implementation or review
 
 If a lane returns BLOCKED, the orchestrator updates the bead (`bd update <id> --status blocked --reason "..."`) and proceeds with remaining lanes. If a lane returns FAILED (review loops exhausted), the orchestrator escalates to the user before continuing.
+
+### Commit Coordination
+
+Multiple lanes commit to the same branch concurrently. This is safe because pre-flight file overlap analysis ensures lanes modify non-overlapping file sets. Each lane commits its own changes independently. If pre-flight analysis cannot confirm non-overlap (e.g., missing file info in spec), the task is forced sequential, eliminating concurrent commit risk.
 
 ### Post-flight Integration Review
 
@@ -103,7 +131,8 @@ Every state transition updates both beads and TodoWrite. Identical to beads-driv
 | Lane returns BLOCKED | `bd update <id> --status blocked` | Mark pending + reason |
 | Lane passes all reviews | (hold until integration review) | (hold) |
 | Integration review passes | `bd close <id>` per lane | Mark each completed |
-| All tasks closed | `bd close <epic-id>` | All completed |
+| All tasks closed | `bd close <epic-id> --reason "All tasks completed"` | All completed |
+| Final code review passes | (epic already closed) | (all already completed) |
 
 If beads and TodoWrite disagree, beads wins. TodoWrite re-syncs from `bd list` after each batch.
 
@@ -135,7 +164,7 @@ bd list --parent <epic-id> --json
 - **Lane BLOCKED:** Update bead, continue with remaining lanes in batch.
 - **Lane FAILED (review exhausted):** Escalate to user with reviewer concerns before proceeding.
 - **Integration review exhausted (3 iterations):** Escalate to user with conflict descriptions.
-- **Implementer NEEDS_CONTEXT 3 times within a lane:** Lane returns FAILED with context requests.
+- **Lane NEEDS_CONTEXT:** Orchestrator provides requested context and re-dispatches the lane (max 3 round-trips). If still unresolved, lane marked FAILED and escalated to user with full context request history.
 - Tracking failures never block code execution. Code failures always stop the lane (not the whole batch).
 
 ## Red Flags
