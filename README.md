@@ -65,7 +65,7 @@ bd init
   "plugin": [
     "superpowers@git+https://github.com/obra/superpowers.git",
     "opencode-beads",
-    "opencode-super-beads"
+    "opencode-super-beads@git+https://github.com/collectiveai-team/opencode-super-beads.git"
   ]
 }
 ```
