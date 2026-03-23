@@ -12,9 +12,37 @@ import {
   detectExecutionChoice,
 } from "./detection";
 import { convertPlanToBeads } from "../converter/plan-to-beads";
-import { loadSkill, loadPrompt } from "../vendor";
+import { loadPrompt, loadSkillTemplate } from "../vendor";
 
 type OpencodeClient = PluginInput["client"];
+
+interface BeadsExecutionMessageInput {
+  epicId: string;
+  planPath: string;
+  taskCount: number;
+  skillTemplate: string | null;
+}
+
+export function buildBeadsExecutionMessage(
+  input: BeadsExecutionMessageInput
+): string {
+  const fallbackTemplate = input.skillTemplate
+    ? `\n\n<fallback-skill-template>\n${input.skillTemplate}\n</fallback-skill-template>`
+    : "";
+
+  return [
+    "The user chose beads-driven development.",
+    "Primary path: use the `super-beads:beads-driven-development` skill.",
+    "Fallback path: use the `super-beads:execute` command alias if the native skill is unavailable.",
+    "",
+    "<beads-execution-context>",
+    `Epic: ${input.epicId}`,
+    `Plan: ${input.planPath}`,
+    `Tasks: ${input.taskCount} issues created in beads`,
+    "",
+    `</beads-execution-context>${fallbackTemplate}`,
+  ].join("\n");
+}
 
 /** State for tracking handoff across messages within a session */
 interface HandoffState {
@@ -68,27 +96,23 @@ export function createHandoffHook(
         // Run converter
         const result = await convertPlanToBeads(state.planPath, $);
 
-        // Load and inject the beads-driven-development skill
-        const skillContent = await loadSkill("beads-driven-development");
-        if (skillContent) {
-          const contextMessage = `<beads-execution-context>
-Epic: ${result.epicId}
-Plan: ${state.planPath}
-Tasks: ${result.taskMapping.size} issues created in beads
+        const skillContent = await loadSkillTemplate("beads-driven-development");
+        const contextMessage = buildBeadsExecutionMessage({
+          epicId: result.epicId,
+          planPath: state.planPath,
+          taskCount: result.taskMapping.size,
+          skillTemplate: skillContent,
+        });
 
-${skillContent}
-</beads-execution-context>`;
-
-          await client.session.prompt({
-            path: { id: sessionID },
-            body: {
-              noReply: true,
-              model: output.message.model,
-              agent: output.message.agent,
-              parts: [{ type: "text", text: contextMessage, synthetic: true }],
-            },
-          });
-        }
+        await client.session.prompt({
+          path: { id: sessionID },
+          body: {
+            noReply: true,
+            model: output.message.model,
+            agent: output.message.agent,
+            parts: [{ type: "text", text: contextMessage, synthetic: true }],
+          },
+        });
         return;
       }
 

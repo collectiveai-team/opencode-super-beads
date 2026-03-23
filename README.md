@@ -79,6 +79,12 @@ Start OpenCode. The plugin will log warnings at startup if prerequisites are mis
 - `bd CLI not found` -- install beads
 - `superpowers prompt templates not found` -- install superpowers
 
+If startup succeeds, the plugin also installs a native OpenCode skill at:
+
+- `~/.config/opencode/skills/super-beads/beads-driven-development/SKILL.md`
+
+You can invoke it manually as `super-beads:beads-driven-development`.
+
 ## Usage
 
 ### Normal Workflow
@@ -101,6 +107,14 @@ Plan detected. Choose an execution strategy:
 
 Choose option 3 to use beads-driven development.
 
+The plugin then routes execution through the native `super-beads:beads-driven-development`
+skill. For manual or fallback usage, it also registers `super-beads:execute` as an
+alias backed by the same bundled instructions.
+
+In the normal handoff flow, the plugin also handles beads initialization and plan
+conversion before invoking the skill. If you invoke the skill manually, use it after
+the plan has already been converted into beads issues.
+
 ### What Happens Next
 
 1. The plugin parses the plan and creates beads issues:
@@ -118,7 +132,8 @@ Choose option 3 to use beads-driven development.
 
 ### Between Sessions
 
-If your session ends mid-execution, start a new session and invoke the execution skill. It will:
+If your session ends mid-execution, start a new session and invoke
+`super-beads:beads-driven-development`. It will:
 
 1. Check `bd list` to see what's done, in progress, and remaining
 2. Rebuild the session progress view
@@ -154,16 +169,19 @@ The execution engine respects all manual changes on its next `bd ready` cycle.
 opencode-super-beads/
 +-- src/
 |   +-- plugin.ts              # Main entry point, startup checks, hook/config wiring
-|   +-- vendor.ts              # Loads markdown files from vendor/
+|   +-- vendor.ts              # Loads bundled skills/prompts and strips frontmatter for runtime use
+|   +-- skills/
+|       +-- install.ts         # Installs bundled skills into OpenCode's native skill path
 |   +-- hooks/
 |   |   +-- detection.ts       # Pure functions: pattern matching (plan completion, choice)
 |   |   +-- handoff.ts         # Hook implementation: message interception + injection
 |   +-- converter/
 |       +-- parser.ts          # Pure functions: plan markdown -> structured data
 |       +-- plan-to-beads.ts   # Orchestrator: parser output + bd CLI -> beads issues
++-- skills/
+|   +-- beads-driven-development/
+|       +-- SKILL.md           # Native OpenCode skill content
 +-- vendor/
-|   +-- skills/
-|   |   +-- beads-driven-development.md   # The execution engine skill
 |   +-- prompts/
 |       +-- execution-options.md          # Handoff choice template
 +-- tests/

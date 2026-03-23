@@ -80,6 +80,11 @@ describe("detectExecutionChoice", () => {
     expect(detectExecutionChoice(msg)).toBe("beads");
   });
 
+  test("detects super-beads native skill reference", () => {
+    const msg = "Use super-beads:beads-driven-development for this plan.";
+    expect(detectExecutionChoice(msg)).toBe("beads");
+  });
+
   test("detects subagent-driven choice", () => {
     const msg =
       "I'll use subagent-driven development to execute this plan.";

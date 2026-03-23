@@ -17,7 +17,7 @@
     "agent"
   ],
   "main": "src/plugin.ts",
-  "files": ["src", "vendor", "README.md"],
+  "files": ["src", "skills", "vendor", "README.md"],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test",

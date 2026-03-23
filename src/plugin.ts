@@ -12,7 +12,8 @@
 
 import type { Plugin, PluginInput } from "@opencode-ai/plugin";
 import { createHandoffHook } from "./hooks/handoff";
-import { loadSkill } from "./vendor";
+import { installBundledSkills } from "./skills/install";
+import { loadSkillTemplate } from "./vendor";
 
 /**
  * Check if bd CLI is available.
@@ -91,8 +92,16 @@ export const SuperBeadsPlugin: Plugin = async ({ client, $ }) => {
     return {};
   }
 
+  try {
+    await installBundledSkills();
+  } catch (error) {
+    console.warn(
+      `[opencode-super-beads] Failed to install bundled skills: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
   // Load skill content for config registration
-  const skillContent = await loadSkill("beads-driven-development");
+  const skillContent = await loadSkillTemplate("beads-driven-development");
 
   // Create the handoff hook
   const handoffHook = createHandoffHook(client, $, bdAvailable);
@@ -101,13 +110,13 @@ export const SuperBeadsPlugin: Plugin = async ({ client, $ }) => {
     "chat.message": handoffHook,
 
     config: async (config) => {
-      // Register the beads-driven-development skill as a command
+      // Register the bundled skill as a manual command alias
       if (skillContent) {
         config.command = {
           ...config.command,
           "super-beads:execute": {
             description:
-              "Execute a plan using beads-driven development (bd ready loop + subagent dispatch)",
+              "Manual alias for super-beads:beads-driven-development",
             template: skillContent,
           },
         };

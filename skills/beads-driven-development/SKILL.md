@@ -1,3 +1,8 @@
+---
+name: beads-driven-development
+description: Use when executing a superpowers implementation plan through beads task scheduling without modifying the superpowers skill tree.
+---
+
 # Beads-Driven Development
 
 Execute a plan using beads as the task manager. Uses `bd ready` for task selection,
@@ -5,10 +10,16 @@ subagent dispatch with two-stage review, and dual tracking (beads + TodoWrite).
 
 ## Prerequisites
 
+For the normal plugin handoff flow, the plugin prepares beads initialization and
+plan-to-beads conversion before invoking this skill.
+
 - `bd` CLI installed and available in PATH
-- Beads initialized in the project (`.beads/` directory exists)
-- Plan file exists and has been converted to beads issues (epic + child tasks)
 - Superpowers prompt templates available (implementer-prompt.md, spec-reviewer-prompt.md, code-quality-reviewer-prompt.md)
+
+If invoking this skill manually, also ensure:
+
+- Beads is initialized in the project (`.beads/` directory exists)
+- The plan has already been converted to beads issues (epic + child tasks)
 
 ## Initialization
 

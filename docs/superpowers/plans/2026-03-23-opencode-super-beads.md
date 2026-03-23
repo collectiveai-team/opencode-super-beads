@@ -4,7 +4,7 @@
 
 **Goal:** Build an OpenCode plugin that bridges superpowers' workflow with beads' task management, adding beads-driven development as a third execution path.
 
-**Architecture:** An OpenCode plugin (`@opencode-ai/plugin`) with three components: a `chat.message` hook that intercepts plan completion and offers execution choices, a plan-to-beads converter that parses plan markdown and creates bead issues with dependencies, and a skill file (`beads-driven-development.md`) containing the full execution engine loop.
+**Architecture:** An OpenCode plugin (`@opencode-ai/plugin`) with three components: a `chat.message` hook that intercepts plan completion and offers execution choices, a plan-to-beads converter that parses plan markdown and creates bead issues with dependencies, and a packaged native skill (`skills/beads-driven-development/SKILL.md`) containing the full execution engine loop.
 
 **Tech Stack:** TypeScript, Bun runtime, `@opencode-ai/plugin` SDK, `@opencode-ai/sdk`, `bd` CLI (beads)
 
