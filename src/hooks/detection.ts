@@ -70,3 +70,49 @@ export function extractPlanPath(
 
   return null;
 }
+
+/** The three execution choices available at handoff */
+export type ExecutionChoice = "beads" | "subagent" | "sequential";
+
+/**
+ * Detect which execution path the user/LLM chose from an assistant message.
+ *
+ * Detection rules (case-insensitive substring match):
+ * - "beads-driven" OR ("beads" + "execution") -> "beads"
+ * - "subagent-driven" OR "subagent-driven-development" -> "subagent"
+ * - "sequential" OR "executing-plans" -> "sequential"
+ * - No clear match -> null (let conversation continue naturally)
+ *
+ * Beads takes priority if multiple signals are present.
+ *
+ * @param message - The assistant message text
+ * @returns The detected choice, or null if no clear signal
+ */
+export function detectExecutionChoice(
+  message: string
+): ExecutionChoice | null {
+  const lower = message.toLowerCase();
+
+  // Beads detection (highest priority)
+  if (
+    lower.includes("beads-driven") ||
+    (lower.includes("beads") && lower.includes("execution"))
+  ) {
+    return "beads";
+  }
+
+  // Subagent detection
+  if (
+    lower.includes("subagent-driven") ||
+    lower.includes("subagent-driven-development")
+  ) {
+    return "subagent";
+  }
+
+  // Sequential detection
+  if (lower.includes("sequential") || lower.includes("executing-plans")) {
+    return "sequential";
+  }
+
+  return null;
+}

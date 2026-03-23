@@ -3,6 +3,7 @@ import {
   isPlanCompletionMessage,
   extractPlanPath,
 } from "../../src/hooks/detection";
+import { detectExecutionChoice, type ExecutionChoice } from "../../src/hooks/detection";
 
 describe("isPlanCompletionMessage", () => {
   test("matches standard writing-plans completion message", () => {
@@ -64,5 +65,47 @@ describe("extractPlanPath", () => {
   test("returns null when no plan path found", () => {
     const msg = "No plan path here. Ready to execute?";
     expect(extractPlanPath(msg)).toBeNull();
+  });
+});
+
+describe("detectExecutionChoice", () => {
+  test("detects beads-driven choice", () => {
+    const msg =
+      "I'll use beads-driven development for this. Let me start by creating the issues.";
+    expect(detectExecutionChoice(msg)).toBe("beads");
+  });
+
+  test("detects beads keyword combination", () => {
+    const msg = "Let's go with beads for execution of this plan.";
+    expect(detectExecutionChoice(msg)).toBe("beads");
+  });
+
+  test("detects subagent-driven choice", () => {
+    const msg =
+      "I'll use subagent-driven development to execute this plan.";
+    expect(detectExecutionChoice(msg)).toBe("subagent");
+  });
+
+  test("detects superpowers:subagent-driven-development reference", () => {
+    const msg =
+      "Using superpowers:subagent-driven-development as required.";
+    expect(detectExecutionChoice(msg)).toBe("subagent");
+  });
+
+  test("detects sequential/executing-plans choice", () => {
+    const msg =
+      "I'll execute this plan sequentially using executing-plans.";
+    expect(detectExecutionChoice(msg)).toBe("sequential");
+  });
+
+  test("returns null for unrelated messages", () => {
+    const msg = "That sounds good. Let me start implementing the first task.";
+    expect(detectExecutionChoice(msg)).toBeNull();
+  });
+
+  test("beads takes priority when multiple signals present", () => {
+    const msg =
+      "Instead of subagent-driven, let's use beads-driven development.";
+    expect(detectExecutionChoice(msg)).toBe("beads");
   });
 });
