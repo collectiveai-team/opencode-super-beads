@@ -1,0 +1,38 @@
+{
+  "name": "opencode-super-beads",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "OpenCode plugin bridging superpowers workflow with beads task management",
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rbarriga/opencode-super-beads"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "beads",
+    "superpowers",
+    "agent"
+  ],
+  "main": "src/plugin.ts",
+  "files": ["src", "vendor", "README.md"],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "test:unit": "bun test tests/"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.0.143",
+    "@opencode-ai/sdk": "^1.0.143"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^22.0.0",
+    "typescript": "~5.9.3"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  }
+}
