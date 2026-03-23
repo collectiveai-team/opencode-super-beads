@@ -46,6 +46,8 @@ Completion (after all tasks closed):
   bd close <epic-id> --reason "All tasks completed"
   Dispatch final code reviewer subagent for entire implementation
     (reviews full diff from epic start to now — catches cross-batch inconsistencies)
+    If findings reported → fix and re-review (follows requesting-code-review skill flow)
+    This review is advisory since individual task reviews already passed
   Invoke finishing-a-development-branch
 ```
 
@@ -101,7 +103,7 @@ If a lane returns BLOCKED, the orchestrator updates the bead (`bd update <id> --
 
 ### Commit Coordination
 
-Multiple lanes commit to the same branch concurrently. This is safe because pre-flight file overlap analysis ensures lanes modify non-overlapping file sets. Each lane commits its own changes independently. If pre-flight analysis cannot confirm non-overlap (e.g., missing file info in spec), the task is forced sequential, eliminating concurrent commit risk.
+Multiple lanes commit to the same branch concurrently. This is safe because pre-flight file overlap analysis ensures lanes modify non-overlapping file sets. Each lane commits its own changes independently. **Lane subagents must only stage their own files by path (`git add <specific-files>`), never use `git add .`** — since lanes share a working directory, `git add .` could stage another lane's uncommitted changes. If pre-flight analysis cannot confirm non-overlap (e.g., missing file info in spec), the task is forced sequential, eliminating concurrent commit risk.
 
 ### Post-flight Integration Review
 
