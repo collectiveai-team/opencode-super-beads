@@ -6,13 +6,16 @@
 
 ## Problem
 
-beads-driven-development processes tasks one at a time: pick a task, implement, spec review, code quality review, close, repeat. When `bd ready` returns multiple independent tasks that touch different files, this leaves throughput on the table. The beads dependency graph already identifies which tasks can safely run concurrently.
+beads-driven-development processes tasks one at a time: pick a task, implement, spec review, code quality review, close, repeat. When `bd ready` returns multiple independent tasks, this leaves throughput on the table. The beads dependency graph already identifies which tasks can safely run concurrently.
+
+Running parallel agents in the same worktree is inherently fragile — concurrent git operations race, `git add .` can stage another agent's files, and even non-overlapping file edits share a single index. Git worktrees solve this at the filesystem level: each lane gets its own isolated working directory and branch.
 
 ## Design Decisions
 
 1. **Review strategy:** Full pipeline per agent. Each parallel lane runs implement → spec review → code quality review independently.
-2. **Conflict resolution:** Both pre-flight file overlap check (avoid obvious collisions) and post-flight integration review (catch semantic conflicts).
-3. **Parallelism limit:** Fixed cap of 3 concurrent lanes. Simple and predictable.
+2. **Isolation:** Each lane gets its own git worktree and branch. No shared working directory, no concurrent git operations on the same index.
+3. **Integration:** After all lanes complete, sequential merge of lane branches back to the main branch, followed by an integration review.
+4. **Parallelism limit:** Fixed cap of 3 concurrent lanes. Simple and predictable.
 
 ## Architecture
 
@@ -24,13 +27,13 @@ flowchart TD
     READY --> CHECK{Tasks available?}
     CHECK -->|No tasks + all closed| COMPLETION
     CHECK -->|No tasks + some open| BLOCKED["Report blocked tasks & pause"]
-    CHECK -->|Tasks available| PREFLIGHT
+    CHECK -->|Tasks available| SELECT["Select batch\n(up to 3 ready tasks)"]
 
-    PREFLIGHT["Pre-flight file overlap analysis"] --> GROUP["Group into non-overlapping lanes\n(max 3, defer overlaps)"]
-    GROUP --> CLAIM["bd update <id> --claim\nper lane"]
-    CLAIM --> PARALLEL
+    SELECT --> CLAIM["bd update <id> --claim\nper task in batch"]
+    CLAIM --> WORKTREES["Create worktree per lane\n(using-git-worktrees skill)"]
+    WORKTREES --> PARALLEL
 
-    subgraph PARALLEL ["Parallel lane dispatch"]
+    subgraph PARALLEL ["Parallel lane dispatch (each in own worktree)"]
         direction LR
         LANE1["Lane 1\nImplement → Spec review\n→ Code quality review"]
         LANE2["Lane 2\nImplement → Spec review\n→ Code quality review"]
@@ -38,31 +41,77 @@ flowchart TD
     end
 
     PARALLEL --> WAIT["Wait for all lanes"]
-    WAIT --> INTEGRATION["Post-flight integration review"]
+    WAIT --> MERGE["Sequential merge\nlane branches → main branch"]
+    MERGE --> CONFLICT{Merge conflicts?}
+    CONFLICT -->|No| INTEGRATION["Post-flight integration review\n(on merged result)"]
+    CONFLICT -->|Yes| RESOLVE["Resolve conflicts\n(fix agent per merge)"]
+    RESOLVE --> INTEGRATION
+
     INTEGRATION --> INTCHECK{Issues found?}
     INTCHECK -->|Clean| CLOSE["Close beads in batch\nRe-sync TodoWrite"]
     INTCHECK -->|Issues| FIX["Fix agent → re-review\n(max 3 iterations)"]
     FIX --> INTCHECK
-    CLOSE --> START
+    CLOSE --> CLEANUP["Remove lane worktrees\n& branches"]
+    CLEANUP --> START
 
     COMPLETION["Close epic\nbd close <epic-id>"] --> FINALREVIEW["Final code reviewer\n(full diff, advisory,\nfollows requesting-code-review flow)"]
     FINALREVIEW --> FINISH([finishing-a-development-branch])
 ```
 
-Graceful degradation: when only 1 task is ready or all tasks share files, behavior is identical to sequential beads-driven-development.
+Graceful degradation: when only 1 task is ready, a single worktree is created and behavior is equivalent to sequential beads-driven-development.
 
-### Pre-flight File Overlap Analysis
+### Worktree Lifecycle
 
-Before dispatching a batch, the orchestrator extracts target files from each task's spec (the plan file text).
+Each lane gets an isolated worktree following the `using-git-worktrees` skill conventions:
 
-**Grouping algorithm:**
+**Setup (before lane dispatch):**
 
-1. For each ready task, extract its file set from the plan spec.
-2. Greedily assign tasks to lanes: a task goes to lane N if it shares no files with any task already in lane N.
-3. If a task overlaps all existing lanes, or MAX_LANES (3) is reached, defer the task to the next batch.
-4. If no file info is available in the spec, treat the task as overlapping with everything (forces sequential).
+1. Determine worktree directory (follow using-git-worktrees priority: existing `.worktrees/` → `worktrees/` → CLAUDE.md preference → ask user).
+2. Verify directory is gitignored (fix if not).
+3. Create one worktree per lane with a dedicated branch:
+   ```bash
+   git worktree add <worktree-dir>/lane-<N>-<bead-id> -b lane/<bead-id>
+   ```
+4. Run project setup in each worktree (auto-detect: `npm install`, `cargo build`, etc.).
+5. Verify clean baseline (tests pass) before dispatching the lane subagent.
 
-**File extraction heuristic:** Look for file paths in the task spec text (patterns like `src/...`, `lib/...`, explicit "Files:" sections). If the plan uses a structured format with file lists per task, use those directly. If ambiguous, fall back to sequential for that task.
+**During execution:** Each lane subagent works entirely within its own worktree. It commits freely to its own branch — no coordination needed with other lanes.
+
+**After all lanes complete — sequential merge:**
+
+```mermaid
+flowchart LR
+    MAIN["main branch\n(batch start point)"] --> M1["Merge lane-1 branch"]
+    M1 --> M2["Merge lane-2 branch"]
+    M2 --> M3["Merge lane-3 branch"]
+    M3 --> MERGED["Merged result\n→ integration review"]
+```
+
+1. From the main worktree, merge each lane branch sequentially:
+   ```bash
+   git merge lane/<bead-id-1> --no-ff -m "Merge lane 1: <task summary>"
+   git merge lane/<bead-id-2> --no-ff -m "Merge lane 2: <task summary>"
+   git merge lane/<bead-id-3> --no-ff -m "Merge lane 3: <task summary>"
+   ```
+2. If a merge produces conflicts, dispatch a conflict resolution agent with the conflict markers and both task specs. Resolve, commit, continue to next merge.
+3. After all merges complete, run integration review on the merged result.
+
+**Cleanup (after integration review passes):**
+
+```bash
+git worktree remove <worktree-dir>/lane-<N>-<bead-id>
+git branch -d lane/<bead-id>
+```
+
+### Batch Selection
+
+Batch selection is simple with worktree isolation — no file overlap analysis needed:
+
+1. Call `bd ready --json` to get all unblocked tasks.
+2. Take the first N tasks (up to MAX_LANES = 3).
+3. If only 1 task is ready, still create a worktree for consistency (or optionally skip worktree overhead and run in-place like sequential beads-driven-development).
+
+Since each lane has its own worktree, tasks that touch the same files can safely run in parallel. Conflicts are resolved at merge time.
 
 ### Task Spec Provisioning
 
@@ -81,11 +130,12 @@ Each lane is dispatched as a single Task subagent that runs the three-stage pipe
 The lane prompt provides:
 - Full task spec text (from provisioning above)
 - Context about where the task fits in the broader plan
+- The worktree path where it should work
 - The review criteria from `spec-reviewer-prompt.md` and `code-quality-reviewer-prompt.md`
 - Instructions to run all three stages sequentially within the session
 
 **NEEDS_CONTEXT handling within lanes:** When the implementer phase encounters ambiguity:
-- **Attempt 1-2:** The lane subagent attempts to self-resolve by reading relevant source files, tests, and documentation in the codebase. It has full file system access and should use it.
+- **Attempt 1-2:** The lane subagent attempts to self-resolve by reading relevant source files, tests, and documentation in the codebase. It has full file system access within its worktree and should use it.
 - **Attempt 3:** If still unresolved, the lane returns NEEDS_CONTEXT to the orchestrator with a description of what it needs.
 - The orchestrator provides the requested context and re-dispatches the lane (resuming the same task, not starting over).
 - If NEEDS_CONTEXT returns 3 times from the orchestrator level, the lane is marked FAILED and escalated to the user.
@@ -99,13 +149,9 @@ The lane subagent returns a structured report:
 
 If a lane returns BLOCKED, the orchestrator updates the bead (`bd update <id> --status blocked --reason "..."`) and proceeds with remaining lanes. If a lane returns FAILED (review loops exhausted), the orchestrator escalates to the user before continuing.
 
-### Commit Coordination
-
-Multiple lanes commit to the same branch concurrently. This is safe because pre-flight file overlap analysis ensures lanes modify non-overlapping file sets. Each lane commits its own changes independently. **Lane subagents must only stage their own files by path (`git add <specific-files>`), never use `git add .`** — since lanes share a working directory, `git add .` could stage another lane's uncommitted changes. If pre-flight analysis cannot confirm non-overlap (e.g., missing file info in spec), the task is forced sequential, eliminating concurrent commit risk.
-
 ### Post-flight Integration Review
 
-After all lanes in a batch complete successfully, a new subagent checks for cross-lane issues:
+After all lane branches are merged, a subagent reviews the merged result for cross-lane issues:
 
 - **Semantic conflicts:** Both tasks modified related interfaces in incompatible ways.
 - **Import/dependency issues:** Task A added a dependency Task B removed.
@@ -113,9 +159,10 @@ After all lanes in a batch complete successfully, a new subagent checks for cros
 - **Test interference:** Tests from one lane break assumptions of another.
 
 **Input to integration reviewer:**
-- List of all files changed across all lanes
+- The merged diff (all changes from the batch)
 - Summary of what each lane implemented
 - The task specs for all lanes in the batch
+- Any merge conflict resolutions that were made
 
 **Resolution flow:**
 1. If no issues found → proceed to close beads.
@@ -129,8 +176,8 @@ Every state transition updates both beads and TodoWrite. Identical to beads-driv
 |---|---|---|
 | Batch dispatched | `bd update <id> --claim` per lane | Mark each in_progress |
 | Lane returns BLOCKED | `bd update <id> --status blocked` | Mark pending + reason |
-| Lane passes all reviews | (hold until integration review) | (hold) |
-| Integration review passes | `bd close <id>` per lane | Mark each completed |
+| Lane passes all reviews | (hold until merge + integration) | (hold) |
+| Merge + integration passes | `bd close <id>` per lane | Mark each completed |
 | All tasks closed | `bd close <epic-id> --reason "All tasks completed"` | All completed |
 | Final code review passes | (epic already closed) | (all already completed) |
 
@@ -141,7 +188,7 @@ If beads and TodoWrite disagree, beads wins. TodoWrite re-syncs from `bd list` a
 Same strategy as beads-driven-development / subagent-driven-development:
 - **Cheap/fast models:** Mechanical tasks (isolated functions, clear specs, 1-2 files).
 - **Standard models:** Integration tasks (multi-file, pattern matching).
-- **Most capable models:** Architecture, design, review tasks, integration review.
+- **Most capable models:** Architecture, design, review tasks, integration review, merge conflict resolution.
 
 ## Initialization
 
@@ -157,15 +204,20 @@ flowchart TD
     CLOSED -->|open| TO["TodoWrite: pending"]
 ```
 
+Additionally, verify the worktree directory is set up (following using-git-worktrees conventions) before entering the core loop.
+
 ## Error Handling
 
 - **`bd ready` error:** Retry once, then report and pause.
 - **`bd close` error:** Log warning, continue (code is done; beads state can be fixed manually).
 - **Lane BLOCKED:** Update bead, continue with remaining lanes in batch.
 - **Lane FAILED (review exhausted):** Escalate to user with reviewer concerns before proceeding.
+- **Merge conflict:** Dispatch conflict resolution agent. If unresolvable after 3 attempts, escalate to user.
 - **Integration review exhausted (3 iterations):** Escalate to user with conflict descriptions.
 - **Lane NEEDS_CONTEXT:** Orchestrator provides requested context and re-dispatches the lane (max 3 round-trips). If still unresolved, lane marked FAILED and escalated to user with full context request history.
+- **Worktree creation failure:** Fall back to sequential execution for this batch (log warning).
 - Tracking failures never block code execution. Code failures always stop the lane (not the whole batch).
+- **Cleanup failures** (worktree removal): Log warning, continue. Stale worktrees can be cleaned manually.
 
 ## Red Flags
 
@@ -178,22 +230,24 @@ flowchart TD
 - Skip re-review after implementer fixes within a lane.
 - Start code quality review before spec compliance passes within a lane.
 - Dispatch a new batch while a previous batch's integration review has open issues.
-- Override pre-flight overlap analysis to force parallel execution.
+- Skip worktree cleanup after batch completion.
+- Run lane subagents in the main worktree when parallel lanes are active.
 
 ## Relationship to Existing Skills
 
-- **beads-driven-development:** Sequential sibling. Use when tasks are heavily interdependent or when you want maximum review rigor with zero conflict risk.
+- **beads-driven-development:** Sequential sibling. Use when tasks are heavily interdependent or when you want simplicity with zero merge overhead.
 - **dispatching-parallel-agents:** Inspiration for the parallel dispatch pattern, but that skill is for independent investigations (single-stage). This skill runs full three-stage pipelines per lane.
 - **subagent-driven-development:** Shares prompt templates (implementer, spec-reviewer, code-quality-reviewer). This skill doesn't replace it; it uses the same building blocks.
+- **using-git-worktrees:** Provides the worktree creation, setup, and verification conventions. This skill follows those conventions for lane isolation.
 
 ## When to Use This Skill vs beads-driven-development
 
 Use **dispatch-parallel-bead-agents** when:
-- Multiple independent tasks are available in `bd ready`.
-- Tasks touch different files/subsystems.
+- Multiple tasks are available in `bd ready` (2+).
 - Throughput matters more than minimal token usage.
+- Project setup is fast enough that worktree overhead is acceptable.
 
 Use **beads-driven-development** (sequential) when:
-- Tasks are heavily interdependent (most overlap files).
-- You want simpler orchestration with zero conflict risk.
-- Only 1-2 tasks are ready at a time anyway.
+- Only 1 task is ready at a time.
+- Project setup is slow (large `npm install`, long compilation) making worktree overhead prohibitive.
+- You want simpler orchestration with no merge step.
