@@ -10,12 +10,16 @@ beads-driven-development processes tasks one at a time: pick a task, implement, 
 
 Running parallel agents in the same worktree is inherently fragile — concurrent git operations race, `git add .` can stage another agent's files, and even non-overlapping file edits share a single index. Git worktrees solve this at the filesystem level: each lane gets its own isolated working directory and branch.
 
+Additionally, the current chunk-based dependency model (all tasks in chunk N+1 depend on ALL tasks in chunk N) was designed for serial execution and is too coarse for parallel work. A fine-grained dependency graph is needed so `bd ready` can release tasks as soon as their actual dependencies complete, not when an entire chunk finishes.
+
 ## Design Decisions
 
 1. **Review strategy:** Full pipeline per agent. Each parallel lane runs implement → spec review → code quality review independently.
 2. **Isolation:** Each lane gets its own git worktree and branch. No shared working directory, no concurrent git operations on the same index.
-3. **Integration:** After all lanes complete, sequential merge of lane branches back to the main branch, followed by an integration review.
-4. **Parallelism limit:** Fixed cap of 3 concurrent lanes. Simple and predictable.
+3. **Branching model:** DAG-based. Each task's worktree branches from the merge of its specific dependencies' branches — not from main or an integration branch. Maximum parallelism: a task starts as soon as its actual dependencies complete.
+4. **Main branch protection:** Main is untouched during execution. All work accumulates in lane branches. A single final merge into main happens only after all tasks complete and pass review.
+5. **Parallelism limit:** Fixed cap of 3 concurrent lanes.
+6. **Fine-grained dependencies:** The plan-to-beads converter produces per-task dependency edges (explicit annotations, file overlap inference, chunk ordering as fallback) so `bd ready` returns tasks at the earliest possible moment.
 
 ## Architecture
 
@@ -27,11 +31,11 @@ flowchart TD
     READY --> CHECK{Tasks available?}
     CHECK -->|No tasks + all closed| COMPLETION
     CHECK -->|No tasks + some open| BLOCKED["Report blocked tasks & pause"]
-    CHECK -->|Tasks available| SELECT["Select batch\n(up to 3 ready tasks)"]
+    CHECK -->|Tasks available| SELECT["Select up to 3 ready tasks"]
 
-    SELECT --> CLAIM["bd update <id> --claim\nper task in batch"]
-    CLAIM --> WORKTREES["Create worktree per lane\n(using-git-worktrees skill)"]
-    WORKTREES --> PARALLEL
+    SELECT --> CLAIM["bd update <id> --claim\nper task"]
+    CLAIM --> BRANCH["Create worktree per task\nbranching from dependency state\n(see DAG Branching)"]
+    BRANCH --> PARALLEL
 
     subgraph PARALLEL ["Parallel lane dispatch (each in own worktree)"]
         direction LR
@@ -40,78 +44,161 @@ flowchart TD
         LANE3["Lane 3\nImplement → Spec review\n→ Code quality review"]
     end
 
-    PARALLEL --> WAIT["Wait for all lanes"]
-    WAIT --> MERGE["Sequential merge\nlane branches → main branch"]
-    MERGE --> CONFLICT{Merge conflicts?}
-    CONFLICT -->|No| INTEGRATION["Post-flight integration review\n(on merged result)"]
-    CONFLICT -->|Yes| RESOLVE["Resolve conflicts\n(fix agent per merge)"]
-    RESOLVE --> INTEGRATION
+    PARALLEL --> DONE["Lane completes → bd close <id>"]
+    DONE --> NEWREADY["Check bd ready again\nNew tasks may be unblocked"]
+    NEWREADY -->|Slots available +\ntasks ready| BRANCH
+    NEWREADY -->|All lanes done,\nno new tasks| READY
 
-    INTEGRATION --> INTCHECK{Issues found?}
-    INTCHECK -->|Clean| CLOSE["Close beads in batch\nRe-sync TodoWrite"]
-    INTCHECK -->|Issues| FIX["Fix agent → re-review\n(max 3 iterations)"]
-    FIX --> INTCHECK
-    CLOSE --> CLEANUP["Remove lane worktrees\n& branches"]
-    CLEANUP --> START
-
-    COMPLETION["Close epic\nbd close <epic-id>"] --> FINALREVIEW["Final code reviewer\n(full diff, advisory,\nfollows requesting-code-review flow)"]
-    FINALREVIEW --> FINISH([finishing-a-development-branch])
+    COMPLETION["All tasks closed"] --> FINAL_MERGE["Topological merge\nall branches → integration branch\n(from HEAD)"]
+    FINAL_MERGE --> FINAL_REVIEW["Final integration review\n+ full code review"]
+    FINAL_REVIEW --> MERGE_MAIN["Merge integration → main"]
+    MERGE_MAIN --> EPIC_CLOSE["bd close <epic-id>"]
+    EPIC_CLOSE --> WRAPUP["Cleanup worktrees + branches\nInvoke finishing-a-development-branch"]
 ```
 
-Graceful degradation: when only 1 task is ready, a single worktree is created and behavior is equivalent to sequential beads-driven-development.
+Key difference from wave-based model: **the loop doesn't wait for all lanes to finish before dispatching new ones.** As soon as a lane completes and frees a slot, `bd ready` is checked for newly unblocked tasks. This is a streaming pool model with MAX_LANES concurrent workers.
 
-### Worktree Lifecycle
+Graceful degradation: when only 1 task is ready and no parallel slots are needed, skip worktree overhead and run in-place (same as sequential beads-driven-development).
 
-Each lane gets an isolated worktree following the `using-git-worktrees` skill conventions:
+### DAG-Based Worktree Branching
 
-**Setup (before lane dispatch):**
+Each task's worktree branches from the state that includes all of its dependencies' completed work. Main is never touched during execution.
 
-1. Determine worktree directory (follow using-git-worktrees priority: existing `.worktrees/` → `worktrees/` → CLAUDE.md preference → ask user).
-2. Verify directory is gitignored (fix if not).
-3. Create one worktree per lane with a dedicated branch:
-   ```bash
-   git worktree add <worktree-dir>/lane-<N>-<bead-id> -b lane/<bead-id>
-   ```
-4. Run project setup in each worktree (auto-detect: `npm install`, `cargo build`, etc.).
-5. Verify clean baseline (tests pass) before dispatching the lane subagent.
+```mermaid
+flowchart TD
+    HEAD["HEAD (main)\nunchanged during execution"] --> A["lane/A\n(no deps → from HEAD)"]
+    HEAD --> B["lane/B\n(no deps → from HEAD)"]
+    HEAD --> C["lane/C\n(no deps → from HEAD)"]
 
-**During execution:** Each lane subagent works entirely within its own worktree. It commits freely to its own branch — no coordination needed with other lanes.
+    A -->|"A done"| D["lane/D\n(depends on A → from lane/A)"]
+    B --> TEMP_BC["temp-base/E\n(merge B + C)"]
+    C --> TEMP_BC
+    TEMP_BC --> E["lane/E\n(depends on B,C → from temp-base/E)"]
 
-**After all lanes complete — sequential merge:**
+    D --> TEMP_DF["temp-base/F\n(merge D + E)"]
+    E --> TEMP_DF
+    TEMP_DF --> F["lane/F\n(depends on D,E → from temp-base/F)"]
+```
+
+**Branching rules:**
+
+| Dependencies | Branch from |
+|---|---|
+| No deps | HEAD (main) |
+| 1 dep | That dep's completed lane branch directly |
+| N deps | Temporary merge branch of all dep lane branches |
+
+**Creating a multi-dep base branch:**
+
+```bash
+# Task E depends on Task B and Task C
+git checkout -b temp-base/E lane/B
+git merge lane/C --no-ff -m "Merge deps for Task E (B+C)"
+# If conflict: dispatch resolution agent with B and C's task specs
+git worktree add <worktree-dir>/lane-E -b lane/E temp-base/E
+```
+
+**If the dependency merge conflicts:** Dispatch a conflict resolution agent. The conflict is between two completed, reviewed tasks — the agent has both task specs and the conflict markers. If unresolvable after 3 attempts, escalate to user. This is rare: tasks with conflicting deps usually indicate a dependency edge is missing.
+
+### Final Merge to Main
+
+After all tasks complete, merge everything into main via an integration branch:
 
 ```mermaid
 flowchart LR
-    MAIN["main branch\n(batch start point)"] --> M1["Merge lane-1 branch"]
-    M1 --> M2["Merge lane-2 branch"]
-    M2 --> M3["Merge lane-3 branch"]
-    M3 --> MERGED["Merged result\n→ integration review"]
+    HEAD["HEAD (main)"] --> INT["integration branch"]
+    INT --> M_A["merge lane/A"]
+    M_A --> M_B["merge lane/B"]
+    M_B --> M_C["merge lane/C"]
+    M_C --> M_D["merge lane/D"]
+    M_D --> M_E["merge lane/E"]
+    M_E --> M_F["merge lane/F"]
+    M_F --> REVIEW["Final review"]
+    REVIEW --> MAIN["Fast-forward\nmain → integration"]
 ```
 
-1. From the main worktree, merge each lane branch sequentially:
-   ```bash
-   git merge lane/<bead-id-1> --no-ff -m "Merge lane 1: <task summary>"
-   git merge lane/<bead-id-2> --no-ff -m "Merge lane 2: <task summary>"
-   git merge lane/<bead-id-3> --no-ff -m "Merge lane 3: <task summary>"
-   ```
-2. If a merge produces conflicts, dispatch a conflict resolution agent with the conflict markers and both task specs. Resolve, commit, continue to next merge.
-3. After all merges complete, run integration review on the merged result.
+1. Create an integration branch from HEAD.
+2. Merge each task's lane branch in **topological order** (dependencies before dependents).
+   - Since dependent branches already include their deps' changes, git's 3-way merge resolves cleanly: the common ancestor is the branch point, and only the task's own changes are new.
+3. Run final integration review on the full diff (integration vs HEAD).
+4. If issues found, fix and re-review (max 3 iterations, then escalate).
+5. Fast-forward main to integration (or merge if main has diverged).
+6. Cleanup: remove all worktrees, lane branches, and temp-base branches.
 
-**Cleanup (after integration review passes):**
+### Enhanced Plan-to-Beads Converter
 
-```bash
-git worktree remove <worktree-dir>/lane-<N>-<bead-id>
-git branch -d lane/<bead-id>
+The existing converter uses coarse chunk-based dependencies. For parallel execution, fine-grained per-task dependencies are needed so `bd ready` can release tasks at the earliest possible moment.
+
+**Dependency resolution priority:**
+
+1. **Explicit plan annotations** (highest priority, most accurate)
+2. **File-based overlap inference** (when no explicit annotation)
+3. **Chunk ordering** (fallback — conservative but safe)
+
+#### 1. Explicit Plan Annotations
+
+The plan format supports a `Depends on:` field per task:
+
+```markdown
+### Task 5: Implement user dashboard
+**Depends on:** Task 2, Task 3
+**Files:**
+- src/components/Dashboard.tsx
+- src/api/dashboard.ts
 ```
 
-### Batch Selection
+The converter parses these annotations and creates direct `bd dep add` edges. This is the most accurate source because the plan author knows the real dependencies.
 
-Batch selection is simple with worktree isolation — no file overlap analysis needed:
+The `writing-plans` skill should be made aware of this format so it produces dependency annotations when the plan is intended for parallel execution.
 
-1. Call `bd ready --json` to get all unblocked tasks.
-2. Take the first N tasks (up to MAX_LANES = 3).
-3. If only 1 task is ready, skip worktree overhead and run in-place (same behavior as sequential beads-driven-development).
+#### 2. File-Based Overlap Inference
 
-Since each lane has its own worktree, tasks that touch the same files can safely run in parallel. Conflicts are resolved at merge time.
+When a task has no explicit `Depends on:` field, the converter analyzes `Files:` sections:
+
+- Extract file paths from each task's `Files:` section.
+- If task Y lists a file that task X also lists, and X has a lower task number, create a dependency edge: Y depends on X.
+- If multiple tasks share files, the one with the lowest task number is treated as the "producer" and all others depend on it.
+
+**Limitations:** File overlap misses non-file dependencies (shared types, API contracts, runtime behavior). But combined with chunk ordering as fallback, it errs on the side of safety.
+
+#### 3. Chunk Ordering Fallback
+
+When a task has no explicit deps AND no file overlap with any prior task, fall back to the existing chunk model:
+
+- Tasks within the same chunk: no dependencies (parallel-safe).
+- Tasks in chunk N+1 with no other deps: depend on all tasks in chunk N.
+
+This ensures that even plans written without parallel execution in mind produce a safe (conservative) dependency graph.
+
+#### Converter Validation
+
+After building the dependency graph, the converter:
+
+1. **Cycle detection:** Run `bd dep cycles` after wiring. If cycles found, report and abort.
+2. **Orphan detection:** Warn if a task in chunk N+1 has no dependencies at all (possible missing annotation).
+3. **Over-connection warning:** Warn if a task depends on more than 50% of all prior tasks (likely chunk fallback — suggest adding explicit annotations).
+
+### Handoff Hook Integration
+
+Add a 4th execution option to `vendor/prompts/execution-options.md`:
+
+```markdown
+4. **Parallel beads-driven development** (requires bd CLI)
+   Creates an epic + task issues in beads from the plan with fine-grained
+   dependency analysis. Dispatches up to 3 tasks in parallel, each in its
+   own git worktree. Tasks start as soon as their specific dependencies
+   complete. Uses DAG-based branching for isolation, with a single final
+   merge to main after all tasks pass review.
+   Skill: `super-beads:dispatch-parallel-bead-agents`.
+```
+
+When the user chooses this option, the handoff hook:
+
+1. Runs the enhanced converter (with dependency analysis) instead of the basic chunk-based converter.
+2. Injects a context message referencing the `dispatch-parallel-bead-agents` skill.
+3. Includes the epic ID, task count, and dependency graph summary.
+
+The existing beads-driven option (option 3) continues to use the chunk-based converter.
 
 ### Task Spec Provisioning
 
@@ -149,39 +236,19 @@ The lane subagent returns a structured report:
 
 If a lane returns BLOCKED, the orchestrator updates the bead (`bd update <id> --status blocked --reason "..."`) and proceeds with remaining lanes. If a lane returns FAILED (review loops exhausted), the orchestrator escalates to the user before continuing.
 
-### Post-flight Integration Review
-
-After all lane branches are merged, a subagent reviews the merged result for cross-lane issues:
-
-- **Semantic conflicts:** Both tasks modified related interfaces in incompatible ways.
-- **Import/dependency issues:** Task A added a dependency Task B removed.
-- **Duplicate code:** Both tasks implemented similar utilities independently.
-- **Test interference:** Tests from one lane break assumptions of another.
-
-**Input to integration reviewer:**
-- The merged diff (all changes from the batch)
-- Summary of what each lane implemented
-- The task specs for all lanes in the batch
-- Any merge conflict resolutions that were made
-
-**Resolution flow:**
-1. If no issues found → proceed to close beads.
-2. If issues found → dispatch fix agent with specific conflict descriptions → integration reviewer re-checks → max 3 iterations → escalate to user.
-
 ### Dual Tracking Protocol
 
-Every state transition updates both beads and TodoWrite. Identical to beads-driven-development except batch-aware:
+Every state transition updates both beads and TodoWrite:
 
 | Event | Beads | TodoWrite |
 |---|---|---|
-| Batch dispatched | `bd update <id> --claim` per lane | Mark each in_progress |
+| Task dispatched to lane | `bd update <id> --claim` | Mark in_progress |
 | Lane returns BLOCKED | `bd update <id> --status blocked` | Mark pending + reason |
-| Lane passes all reviews | (hold until merge + integration) | (hold) |
-| Merge + integration passes | `bd close <id>` per lane | Mark each completed |
-| All tasks closed | `bd close <epic-id> --reason "All tasks completed"` | All completed |
-| Final code review passes | (epic already closed) | (all already completed) |
+| Lane passes all reviews | `bd close <id>` | Mark completed |
+| All tasks closed | (proceed to final merge) | All completed |
+| Final merge + review passes | `bd close <epic-id>` | (all already completed) |
 
-If beads and TodoWrite disagree, beads wins. TodoWrite re-syncs from `bd list` after each batch.
+If beads and TodoWrite disagree, beads wins. TodoWrite re-syncs from `bd list` periodically.
 
 ### Model Selection
 
@@ -197,48 +264,54 @@ Before entering the execution loop, sync session state with beads (same as beads
 ```mermaid
 flowchart TD
     INIT["bd list --parent <epic-id> --json"] --> FOREACH["For each issue"]
-    FOREACH --> CLOSED{status?}
-    CLOSED -->|closed| TC["TodoWrite: completed"]
-    CLOSED -->|in_progress| TIP["TodoWrite: in_progress\nAsk user: continue or restart?"]
-    CLOSED -->|blocked| TB["TodoWrite: pending\n(annotate blocked by <dep-id>)"]
-    CLOSED -->|open| TO["TodoWrite: pending"]
+    FOREACH --> STATUS{status?}
+    STATUS -->|closed| TC["TodoWrite: completed"]
+    STATUS -->|in_progress| TIP["TodoWrite: in_progress\nAsk user: continue or restart?"]
+    STATUS -->|blocked| TB["TodoWrite: pending\n(annotate blocked by dep)"]
+    STATUS -->|open| TO["TodoWrite: pending"]
 ```
 
-Additionally, verify the worktree directory is set up (following using-git-worktrees conventions) before entering the core loop.
+Additionally:
+- Verify the worktree directory is set up (following using-git-worktrees conventions).
+- Check for any stale lane worktrees/branches from a previous interrupted session and clean them up.
+- Build the dependency graph from beads (`bd dep tree <epic-id>`) to understand branching requirements.
 
 ## Error Handling
 
 - **`bd ready` error:** Retry once, then report and pause.
 - **`bd close` error:** Log warning, continue (code is done; beads state can be fixed manually).
-- **Lane BLOCKED:** Update bead, continue with remaining lanes in batch.
+- **Lane BLOCKED:** Update bead, continue with remaining lanes.
 - **Lane FAILED (review exhausted):** Escalate to user with reviewer concerns before proceeding.
-- **Merge conflict:** Dispatch conflict resolution agent. If unresolvable after 3 attempts, escalate to user.
-- **Integration review exhausted (3 iterations):** Escalate to user with conflict descriptions.
+- **Dependency merge conflict (creating multi-dep base branch):** Dispatch conflict resolution agent. If unresolvable after 3 attempts, escalate to user. This usually indicates a missing dependency edge.
+- **Final topological merge conflict:** Dispatch resolution agent per merge step. Escalate if unresolvable.
 - **Lane NEEDS_CONTEXT:** Orchestrator provides requested context and re-dispatches the lane (max 3 round-trips). If still unresolved, lane marked FAILED and escalated to user with full context request history.
-- **Worktree creation failure:** Fall back to sequential execution for this batch (log warning).
-- Tracking failures never block code execution. Code failures always stop the lane (not the whole batch).
+- **Worktree creation failure:** Fall back to sequential execution for this task (log warning).
+- **Dependency cycle detected during conversion:** Abort conversion, report cycle to user.
+- Tracking failures never block code execution. Code failures always stop the lane.
 - **Cleanup failures** (worktree removal): Log warning, continue. Stale worktrees can be cleaned manually.
 
 ## Red Flags
 
 **Never:**
+- Merge anything into main during execution (only at the very end).
 - Skip reviews (spec compliance OR code quality) in any lane.
-- Skip integration review after a multi-lane batch.
-- Proceed with unfixed integration issues.
+- Skip the final integration review.
+- Proceed with unfixed merge or integration issues.
 - Dispatch more than MAX_LANES concurrent lanes.
 - Make subagents read the plan file (provide full text instead).
 - Skip re-review after implementer fixes within a lane.
 - Start code quality review before spec compliance passes within a lane.
-- Dispatch a new batch while a previous batch's integration review has open issues.
-- Skip worktree cleanup after batch completion.
+- Create a task's worktree from HEAD when it has dependencies (must branch from dependency state).
 - Run lane subagents in the main worktree when parallel lanes are active.
+- Skip dependency cycle validation during conversion.
 
 ## Relationship to Existing Skills
 
-- **beads-driven-development:** Sequential sibling. Use when tasks are heavily interdependent or when you want simplicity with zero merge overhead.
+- **beads-driven-development:** Sequential sibling. Uses chunk-based converter. Use when tasks are heavily interdependent or when you want simplicity with zero merge overhead.
 - **dispatching-parallel-agents:** Inspiration for the parallel dispatch pattern, but that skill is for independent investigations (single-stage). This skill runs full three-stage pipelines per lane.
 - **subagent-driven-development:** Shares prompt templates (implementer, spec-reviewer, code-quality-reviewer). This skill doesn't replace it; it uses the same building blocks.
 - **using-git-worktrees:** Provides the worktree creation, setup, and verification conventions. This skill follows those conventions for lane isolation.
+- **writing-plans:** Should produce `Depends on:` annotations when the user intends parallel execution. The enhanced converter reads these annotations.
 
 ## When to Use This Skill vs beads-driven-development
 
@@ -246,8 +319,10 @@ Use **dispatch-parallel-bead-agents** when:
 - Multiple tasks are available in `bd ready` (2+).
 - Throughput matters more than minimal token usage.
 - Project setup is fast enough that worktree overhead is acceptable.
+- The plan has tasks that can genuinely run in parallel.
 
 Use **beads-driven-development** (sequential) when:
 - Only 1 task is ready at a time.
 - Project setup is slow (large `npm install`, long compilation) making worktree overhead prohibitive.
 - You want simpler orchestration with no merge step.
+- Tasks are tightly coupled and nearly all depend on each other.
