@@ -29,9 +29,10 @@ describe("parsePlan", () => {
   test("extracts chunks", async () => {
     planContent = await fs.readFile(FIXTURE_PATH, "utf-8");
     const result = parsePlan(planContent);
-    expect(result.chunks).toHaveLength(2);
+    expect(result.chunks).toHaveLength(3);
     expect(result.chunks[0]!.name).toBe("Core Auth");
     expect(result.chunks[1]!.name).toBe("Role-Based Access");
+    expect(result.chunks[2]!.name).toBe("Integration");
   });
 
   test("extracts tasks within chunks", async () => {
@@ -53,6 +54,41 @@ describe("parsePlan", () => {
     const task1 = result.chunks[0]!.tasks[0]!;
     expect(task1.filesSection).toContain("src/auth/token.ts");
     expect(task1.filesSection).toContain("tests/auth/token.test.ts");
+    expect(task1.filesSection).not.toContain("Step 1: Write the failing test");
+  });
+
+  test("extracts file paths and strips trailing line ranges", async () => {
+    planContent = await fs.readFile(FIXTURE_PATH, "utf-8");
+    const result = parsePlan(planContent);
+    const task5 = result.chunks[2]!.tasks.find((task) => task.number === 5)!;
+
+    expect(task5.filePaths).toEqual([
+      "src/dashboard/integration.ts",
+      "src/auth/middleware.ts",
+      "tests/dashboard/integration.test.ts",
+    ]);
+  });
+
+  test("keeps file bullets with trailing text after the backticked path", () => {
+    const plan = parsePlan(`# Plan
+
+**Goal:** Test files parsing
+
+---
+
+### Task 1: Prompt Template
+
+**Files:**
+- Create: \`vendor/prompts/execution-options.md\` (placeholder)
+
+- [ ] **Step 1: Do it**
+`);
+    const task1 = plan.chunks[0]!.tasks[0]!;
+
+    expect(task1.filesSection).toContain("vendor/prompts/execution-options.md");
+    expect(task1.filesSection).toContain("(placeholder)");
+    expect(task1.filesSection).not.toContain("Step 1: Do it");
+    expect(task1.filePaths).toEqual(["vendor/prompts/execution-options.md"]);
   });
 
   test("captures full task content", async () => {
@@ -68,7 +104,7 @@ describe("parsePlan", () => {
     planContent = await fs.readFile(FIXTURE_PATH, "utf-8");
     const result = parsePlan(planContent);
     const totalTasks = result.chunks.reduce((sum, c) => sum + c.tasks.length, 0);
-    expect(totalTasks).toBe(4);
+    expect(totalTasks).toBe(6);
   });
 
   test("handles plan with no chunks (all tasks at top level)", () => {
@@ -190,5 +226,39 @@ describe("buildDependencyGraph", () => {
     // Task 3 does NOT depend on Task 1 directly
     // (beads resolves transitive deps: 3->2->1, so direct 3->1 edge is unnecessary)
     expect(edges).not.toContainEqual({ taskNumber: 3, dependsOn: 1 });
+  });
+});
+
+describe("dependsOn parsing", () => {
+  test("extracts Depends on annotation from task", async () => {
+    const planContent = await fs.readFile(FIXTURE_PATH, "utf-8");
+    const result = parsePlan(planContent);
+    const chunk3 = result.chunks.find((c) => c.name === "Integration");
+
+    expect(chunk3).toBeDefined();
+
+    const task5 = chunk3!.tasks.find((t) => t.number === 5);
+    expect(task5).toBeDefined();
+    expect(task5!.dependsOn).toEqual([2, 3]);
+  });
+
+  test("extracts single dependency", async () => {
+    const planContent = await fs.readFile(FIXTURE_PATH, "utf-8");
+    const result = parsePlan(planContent);
+    const chunk3 = result.chunks.find((c) => c.name === "Integration");
+
+    expect(chunk3).toBeDefined();
+
+    const task6 = chunk3!.tasks.find((t) => t.number === 6);
+    expect(task6).toBeDefined();
+    expect(task6!.dependsOn).toEqual([1]);
+  });
+
+  test("returns empty array when no Depends on annotation", async () => {
+    const planContent = await fs.readFile(FIXTURE_PATH, "utf-8");
+    const result = parsePlan(planContent);
+    const task1 = result.chunks[0]!.tasks[0]!;
+
+    expect(task1.dependsOn).toEqual([]);
   });
 });

@@ -63,3 +63,32 @@
 - [ ] **Step 2: Implement guard**
 
 - [ ] **Step 3: Commit**
+
+## Chunk 3: Integration
+
+### Task 5: Dashboard Integration
+
+**Depends on:** Task 2, Task 3
+**Files:**
+- Create: `src/dashboard/integration.ts`
+- Modify: `src/auth/middleware.ts:50-60`
+- Test: `tests/dashboard/integration.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+- [ ] **Step 2: Implement integration**
+
+- [ ] **Step 3: Commit**
+
+### Task 6: API Gateway
+
+**Depends on:** Task 1
+**Files:**
+- Create: `src/gateway/api.ts`
+- Test: `tests/gateway/api.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+- [ ] **Step 2: Implement gateway**
+
+- [ ] **Step 3: Commit**

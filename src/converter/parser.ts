@@ -13,6 +13,10 @@ export interface ParsedTask {
   name: string;
   /** The **Files:** section content */
   filesSection: string;
+  /** Individual file paths extracted from the Files: section (used by parallel execution) */
+  filePaths?: string[];
+  /** Explicit dependency task numbers from "**Depends on:** Task N, Task M" (used by parallel execution) */
+  dependsOn?: number[];
   /** The full task content (everything from ### Task N to the next ### or ##) */
   fullContent: string;
 }
@@ -118,8 +122,10 @@ function extractTasks(content: string): ParsedTask[] {
     const fullContent = content.slice(startIndex, endIndex).trim();
 
     const filesSection = extractFilesSection(fullContent);
+    const filePaths = extractFilePaths(filesSection);
+    const dependsOn = extractDependsOn(fullContent);
 
-    tasks.push({ number, name, filesSection, fullContent });
+    tasks.push({ number, name, filesSection, filePaths, dependsOn, fullContent });
   }
 
   return tasks;
@@ -127,9 +133,56 @@ function extractTasks(content: string): ParsedTask[] {
 
 function extractFilesSection(taskContent: string): string {
   const filesMatch = taskContent.match(
-    /\*\*Files:\*\*\s*\n((?:\s*-\s+.+\n?)+)/
+    /\*\*Files:\*\*\s*\n((?:\s*-\s+(?:Create|Modify|Test):\s+`[^`]+`[^\n]*\n?)*)/
   );
   return filesMatch?.[1]?.trim() ?? "";
+}
+
+/**
+ * Extract individual file paths from the Files: section.
+ * Parses lines like "- Create: `src/foo.ts`" or "- Modify: `src/bar.ts:10-20`"
+ *
+ * @param filesSection - The raw Files: section content
+ * @returns Array of file paths (without line ranges)
+ */
+function extractFilePaths(filesSection: string): string[] {
+  if (!filesSection) return [];
+
+  const paths: string[] = [];
+  const lines = filesSection.split("\n");
+
+  for (const line of lines) {
+    const pathMatch = line.match(/`([^`]+)`/);
+    if (pathMatch?.[1]) {
+      paths.push(pathMatch[1].replace(/:\d+(-\d+)?$/, ""));
+    }
+  }
+
+  return paths;
+}
+
+/**
+ * Extract explicit dependency task numbers from task content.
+ * Parses "**Depends on:** Task 2, Task 3" annotations.
+ *
+ * @param taskContent - The full content of a single task
+ * @returns Array of task numbers this task depends on
+ */
+function extractDependsOn(taskContent: string): number[] {
+  const match = taskContent.match(/\*\*Depends on:\*\*\s*(.+)$/m);
+  if (!match?.[1]) return [];
+
+  const deps: number[] = [];
+  const refs = match[1].split(",");
+
+  for (const ref of refs) {
+    const numMatch = ref.trim().match(/Task\s+(\d+)/i);
+    if (numMatch?.[1]) {
+      deps.push(parseInt(numMatch[1], 10));
+    }
+  }
+
+  return deps;
 }
 
 /** A dependency edge: taskNumber depends on dependsOn */
