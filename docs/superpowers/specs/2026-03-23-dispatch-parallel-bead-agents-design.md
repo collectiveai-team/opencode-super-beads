@@ -277,9 +277,9 @@ flowchart TD
 
 Additionally:
 - Verify the worktree directory is set up (following using-git-worktrees conventions).
-- **Branch recovery:** Completed task branches (`lane/<bead-id>` and `temp-base/<bead-id>`) are part of the DAG backbone — they MUST be preserved until the final merge. Only clean up worktrees and branches for tasks whose beads are still `open` or `in_progress` (these are incomplete/abandoned and safe to remove). Never delete a branch for a `closed` bead.
+- **Branch recovery:** Completed task branches (`lane/<bead-id>` and `temp-base/<bead-id>`) are part of the DAG backbone — they MUST be preserved until the final merge. Never delete a branch for a `closed` bead. For `in_progress` beads, the user is asked "continue or restart?" — only clean up the worktree and branch if the user chooses "restart." If they choose "continue," preserve the branch (it contains partial work). For `open` beads with stale worktrees, clean up safely.
 - Build the dependency graph from beads (`bd dep tree <epic-id>`) to understand branching requirements.
-- If a completed task's lane branch is missing (manual deletion or corruption), the task must be re-executed: reopen the bead (`bd reopen <id>`), which will re-enter it into `bd ready` when its deps are satisfied.
+- If a completed task's lane branch is missing (manual deletion or corruption), the task must be re-executed: reopen the bead (`bd reopen <id>`), which will re-enter it into `bd ready` when its deps are satisfied. **Cascade:** any dependents of a reopened task that already completed should be inspected during the final merge — their branches were built on the original (now-missing) work. If the re-execution produces different results, dependent branches may need re-execution too. Flag these for the user's attention.
 
 ## Error Handling
 
