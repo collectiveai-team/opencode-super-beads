@@ -58,9 +58,9 @@ Append to `tests/fixtures/sample-plan.md` a third chunk with dependency annotati
 - [ ] **Step 3: Commit**
 ```
 
-- [ ] **Step 2: Update existing test assertions broken by new fixture data**
+- [ ] **Step 2: Update existing test assertions for the new fixture data**
 
-The new chunk adds 2 more tasks (5, 6) and 1 more chunk, breaking existing assertions. Update in `tests/converter/parser.test.ts`:
+The new chunk adds 2 more tasks (5, 6) and 1 more chunk. Update the affected assertions in `tests/converter/parser.test.ts`:
 
 ```typescript
 // Line ~32: was toHaveLength(2), now 3 chunks
@@ -70,14 +70,7 @@ expect(result.chunks).toHaveLength(3);
 expect(totalTasks).toBe(6);
 ```
 
-Also update any manually-constructed `ParsedTask` objects in the `buildDependencyGraph` tests to include the new required fields (`filePaths: []` and `dependsOn: []`):
-
-```typescript
-// Every manual { number: N, name: "X", filesSection: "", fullContent: "" }
-// becomes: { number: N, name: "X", filesSection: "", filePaths: [], dependsOn: [], fullContent: "" }
-```
-
-There are 4 such constructions across the `buildDependencyGraph` test cases (single-chunk test and three-chunk test).
+No changes needed to manually-constructed `ParsedTask` objects — the new fields are optional so existing constructions still typecheck.
 
 - [ ] **Step 3: Write the failing tests for dependsOn parsing**
 
@@ -132,10 +125,10 @@ export interface ParsedTask {
   name: string;
   /** The **Files:** section content */
   filesSection: string;
-  /** Individual file paths extracted from the Files: section */
-  filePaths: string[];
-  /** Explicit dependency task numbers (from "**Depends on:** Task N, Task M") */
-  dependsOn: number[];
+  /** Individual file paths extracted from the Files: section (used by parallel execution) */
+  filePaths?: string[];
+  /** Explicit dependency task numbers from "**Depends on:** Task N, Task M" (used by parallel execution) */
+  dependsOn?: number[];
   /** The full task content (everything from ### Task N to the next ### or ##) */
   fullContent: string;
 }
@@ -548,7 +541,7 @@ export function buildLayeredDependencyGraph(
 
   // Layer 1: Explicit deps
   for (const task of allTasks) {
-    for (const depNum of task.dependsOn) {
+    for (const depNum of task.dependsOn ?? []) {
       if (taskByNumber.has(depNum)) {
         edges.push({ taskNumber: task.number, dependsOn: depNum, source: "explicit" });
         tasksWithDeps.add(task.number);
@@ -561,7 +554,7 @@ export function buildLayeredDependencyGraph(
     for (let j = i + 1; j < allTasks.length; j++) {
       const taskA = allTasks[i]!;
       const taskB = allTasks[j]!;
-      const overlap = findFileOverlap(taskA.filePaths, taskB.filePaths);
+      const overlap = findFileOverlap(taskA.filePaths ?? [], taskB.filePaths ?? []);
       if (overlap.length > 0) {
         // Lower task number is the "producer"
         const [producer, consumer] =
@@ -772,48 +765,14 @@ git commit -m "feat: add layered dependency analyzer with cycle detection and va
 
 Extends the existing converter and handoff hook to support the parallel beads-driven execution path. Side-effectful code that calls `bd` CLI.
 
-### Task 3: Extract Shared Beads Helpers and Build Parallel Converter
+### Task 3: Parallel Plan-to-Beads Converter
 
 **Depends on:** Task 2
 **Files:**
-- Create: `src/converter/beads-helpers.ts`
-- Modify: `src/converter/plan-to-beads.ts`
 - Create: `src/converter/parallel-converter.ts`
 - Create: `tests/converter/parallel-converter.test.ts`
 
-Before creating the parallel converter, extract the 6 shared helper functions (`ensureBeadsInitialized`, `findExistingEpic`, `rebuildMappingFromExisting`, `createIssue`, `createChildIssue`, `addDependency`) from `src/converter/plan-to-beads.ts` into a new `src/converter/beads-helpers.ts`. Update `plan-to-beads.ts` to import from the helpers module. Then build the parallel converter on top of the same helpers.
-
-- [ ] **Step 0a: Extract beads-helpers.ts from plan-to-beads.ts**
-
-Create `src/converter/beads-helpers.ts` by moving the following functions from `plan-to-beads.ts`: `ensureBeadsInitialized`, `findExistingEpic`, `rebuildMappingFromExisting`, `createIssue`, `createChildIssue`, `addDependency`. Export all of them. Also export the `TaskMapping` type.
-
-- [ ] **Step 0b: Update plan-to-beads.ts to import from beads-helpers.ts**
-
-Replace the moved functions with imports:
-
-```typescript
-import {
-  ensureBeadsInitialized,
-  findExistingEpic,
-  rebuildMappingFromExisting,
-  createIssue,
-  createChildIssue,
-  addDependency,
-  type TaskMapping,
-} from "./beads-helpers";
-```
-
-- [ ] **Step 0c: Verify existing tests still pass**
-
-Run: `bun test`
-Expected: All existing tests pass (refactoring only, no behavior change)
-
-- [ ] **Step 0d: Commit the extraction**
-
-```bash
-git add src/converter/beads-helpers.ts src/converter/plan-to-beads.ts
-git commit -m "refactor: extract shared beads helpers into beads-helpers.ts"
-```
+Self-contained converter for the parallel execution path. Has its own bd helper functions — intentionally independent from `plan-to-beads.ts` so the existing sequential skill is completely untouched.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -928,16 +887,11 @@ import { parsePlan } from "./parser";
 import type { ParsedPlan } from "./parser";
 import { buildLayeredDependencyGraph } from "./dependency-analyzer";
 import type { DependencyAnalysisResult } from "./dependency-analyzer";
-import {
-  ensureBeadsInitialized,
-  rebuildMappingFromExisting,
-  createIssue,
-  createChildIssue,
-  addDependency,
-  type TaskMapping,
-} from "./beads-helpers";
 
 type Shell = PluginInput["$"];
+
+/** Mapping of task number to bead issue ID */
+export type TaskMapping = Map<number, string>;
 
 /** Result of the parallel conversion process */
 export interface ParallelConversionResult {
