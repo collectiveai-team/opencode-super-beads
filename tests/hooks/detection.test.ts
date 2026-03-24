@@ -113,4 +113,21 @@ describe("detectExecutionChoice", () => {
       "Instead of subagent-driven, let's use beads-driven development.";
     expect(detectExecutionChoice(msg)).toBe("beads");
   });
+
+  describe("parallel beads", () => {
+    test("detects parallel beads-driven choice", () => {
+      const msg = "I'll use parallel beads-driven development for maximum throughput.";
+      expect(detectExecutionChoice(msg)).toBe("parallel-beads");
+    });
+
+    test("detects parallel-beads keyword", () => {
+      const msg = "Let's go with parallel-beads execution.";
+      expect(detectExecutionChoice(msg)).toBe("parallel-beads");
+    });
+
+    test("parallel-beads takes priority over regular beads", () => {
+      const msg = "Instead of beads-driven, let's use parallel beads-driven development.";
+      expect(detectExecutionChoice(msg)).toBe("parallel-beads");
+    });
+  });
 });
