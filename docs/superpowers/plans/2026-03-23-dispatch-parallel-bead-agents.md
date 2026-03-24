@@ -902,19 +902,30 @@ export interface ParallelConversionResult {
 }
 
 /**
- * Convert a plan file to beads issues with fine-grained dependencies.
- *
- * Differs from the basic convertPlanToBeads:
- * - Uses layered dependency analysis (explicit + file overlap + chunk fallback)
- * - Aborts if dependency cycles are detected
- * - Returns the full analysis result for the orchestrator
+ * Convenience wrapper: analyze + create in one call (used by tests and direct invocation).
  */
 export async function convertPlanToBeadsParallel(
   planPath: string,
   $: Shell
 ): Promise<ParallelConversionResult> {
-  await ensureBeadsInitialized($);
+  const analysis = await analyzePlanDependencies(planPath);
+  return createBeadsFromAnalysis(planPath, analysis, $);
+}
 
+/** Result of Phase 1: dependency analysis (before bead creation) */
+export interface PlanAnalysis {
+  plan: ParsedPlan;
+  depResult: DependencyAnalysisResult;
+  planPath: string;
+}
+
+/**
+ * Phase 1: Analyze plan dependencies without creating beads.
+ * Returns the inferred graph for user confirmation.
+ */
+export async function analyzePlanDependencies(
+  planPath: string
+): Promise<PlanAnalysis> {
   const content = await fs.readFile(planPath, "utf-8");
   const plan = parsePlan(content);
 
@@ -922,12 +933,10 @@ export async function convertPlanToBeadsParallel(
     throw new Error("Plan has no tasks to convert");
   }
 
-  // Build fine-grained dependency graph
-  const analysis = buildLayeredDependencyGraph(plan.chunks);
+  const depResult = buildLayeredDependencyGraph(plan.chunks);
 
-  // Abort on cycles
-  if (analysis.validation.hasCycles) {
-    const cycleStr = analysis.validation.cycles
+  if (depResult.validation.hasCycles) {
+    const cycleStr = depResult.validation.cycles
       .map((c) => c.join(" → "))
       .join("; ");
     throw new Error(
@@ -935,11 +944,27 @@ export async function convertPlanToBeadsParallel(
     );
   }
 
+  return { plan, depResult, planPath };
+}
+
+/**
+ * Phase 2: Create beads from a confirmed dependency analysis.
+ * Called after user reviews and confirms the inferred graph.
+ */
+export async function createBeadsFromAnalysis(
+  planPath: string,
+  analysis: PlanAnalysis,
+  $: Shell
+): Promise<ParallelConversionResult> {
+  await ensureBeadsInitialized($);
+
+  const { plan, depResult } = analysis;
+
   // Log warnings
-  for (const warn of analysis.validation.orphanWarnings) {
+  for (const warn of depResult.validation.orphanWarnings) {
     console.warn(`[parallel-converter] ${warn}`);
   }
-  for (const warn of analysis.validation.overConnectionWarnings) {
+  for (const warn of depResult.validation.overConnectionWarnings) {
     console.warn(`[parallel-converter] ${warn}`);
   }
 
@@ -948,7 +973,7 @@ export async function convertPlanToBeadsParallel(
   const existingEpicId = await findExistingParallelEpic(planPath, $);
   if (existingEpicId) {
     const taskMapping = await rebuildMappingFromExisting(existingEpicId, $);
-    return { epicId: existingEpicId, taskMapping, plan, analysis };
+    return { epicId: existingEpicId, taskMapping, plan, analysis: depResult };
   }
 
   // Create epic
@@ -968,7 +993,7 @@ export async function convertPlanToBeadsParallel(
 
   // Wire fine-grained dependencies (deduplicate by unique pair)
   const wiredPairs = new Set<string>();
-  for (const edge of analysis.edges) {
+  for (const edge of depResult.edges) {
     const pairKey = `${edge.taskNumber}:${edge.dependsOn}`;
     if (wiredPairs.has(pairKey)) continue;
     wiredPairs.add(pairKey);
@@ -980,7 +1005,7 @@ export async function convertPlanToBeadsParallel(
     }
   }
 
-  return { epicId, taskMapping, plan, analysis };
+  return { epicId, taskMapping, plan, analysis: depResult };
 }
 
 /**
@@ -1125,30 +1150,82 @@ Which approach would you like to use?
 </execution-options>
 ```
 
-- [ ] **Step 6: Update handoff hook for parallel-beads choice**
+- [ ] **Step 6: Update handoff hook for parallel-beads choice (two-phase flow)**
 
-In `src/hooks/handoff.ts`, add the parallel-beads handling. After the existing `choice === "beads"` block (around line 93), add:
+In `src/hooks/handoff.ts`, add the parallel-beads handling. This is a two-phase process:
+- **Phase 1:** Analyze dependencies, present inferred graph to the user for confirmation.
+- **Phase 2:** After confirmation, create beads with the confirmed graph.
+
+Update the `HandoffState` interface to track the parallel flow:
+
+```typescript
+interface HandoffState {
+  planPath: string;
+  awaitingChoice: boolean;
+  /** Phase 2: awaiting user confirmation of inferred dependency graph */
+  awaitingDepConfirmation?: boolean;
+  /** Cached analysis result from Phase 1 */
+  cachedAnalysis?: any; // DependencyAnalysisResult + ParsedPlan
+}
+```
+
+After the existing `choice === "beads"` block (around line 93), add Phase 1:
 
 ```typescript
 if (choice === "parallel-beads" && state.planPath) {
-  sessionState.delete(sessionID);
-
-  // Run enhanced converter with fine-grained dependencies
-  const { convertPlanToBeadsParallel } = await import(
+  // Phase 1: Analyze dependencies, present for confirmation
+  const { analyzePlanDependencies } = await import(
     "../converter/parallel-converter"
   );
-  const result = await convertPlanToBeadsParallel(state.planPath, $);
+  const analysis = await analyzePlanDependencies(state.planPath);
 
-  const skillContent = await loadSkillTemplate(
-    "dispatch-parallel-bead-agents"
+  // Update state to Phase 2
+  sessionState.set(sessionID, {
+    ...state,
+    awaitingChoice: false,
+    awaitingDepConfirmation: true,
+    cachedAnalysis: analysis,
+  });
+
+  // Inject dependency graph summary for user review
+  const graphSummary = formatDependencyGraph(analysis);
+  await client.session.prompt({
+    path: { id: sessionID },
+    body: {
+      noReply: true,
+      model: output.message.model,
+      agent: output.message.agent,
+      parts: [{ type: "text", text: graphSummary, synthetic: true }],
+    },
+  });
+  return;
+}
+```
+
+Add Phase 2 handling (before the Phase 1 check, in the state machine):
+
+```typescript
+// Phase 2: User confirmed dependency graph → create beads
+if (state?.awaitingDepConfirmation && state.cachedAnalysis) {
+  sessionState.delete(sessionID);
+
+  const { createBeadsFromAnalysis } = await import(
+    "../converter/parallel-converter"
   );
+  const result = await createBeadsFromAnalysis(
+    state.planPath,
+    state.cachedAnalysis,
+    $
+  );
+
+  const skillContent = await loadSkillTemplate("dispatch-parallel-bead-agents");
   const contextMessage = buildBeadsExecutionMessage({
     epicId: result.epicId,
     planPath: state.planPath,
     taskCount: result.taskMapping.size,
     skillTemplate: skillContent,
     parallel: true,
-    depSummary: `${result.analysis.edges.length} dependency edges (${result.analysis.edges.filter((e) => e.source === "explicit").length} explicit, ${result.analysis.edges.filter((e) => e.source === "file-overlap").length} file-overlap, ${result.analysis.edges.filter((e) => e.source === "chunk-fallback").length} chunk-fallback)`,
+    depSummary: `${result.analysis.edges.length} dependency edges`,
   });
 
   await client.session.prompt({
@@ -1161,6 +1238,39 @@ if (choice === "parallel-beads" && state.planPath) {
     },
   });
   return;
+}
+```
+
+Add the `formatDependencyGraph` helper function:
+
+```typescript
+function formatDependencyGraph(analysis: any): string {
+  const { plan, depResult } = analysis;
+  const allTasks = plan.chunks.flatMap((c: any) => c.tasks);
+  const lines = ["<parallel-dependency-graph>",
+    "Inferred dependency graph for parallel execution:", ""];
+
+  for (const task of allTasks) {
+    const deps = depResult.edges
+      .filter((e: any) => e.taskNumber === task.number)
+      .map((e: any) => `Task ${e.dependsOn} (${e.source})`)
+      .join(", ");
+    lines.push(deps
+      ? `  Task ${task.number}: ${task.name} → depends on ${deps}`
+      : `  Task ${task.number}: ${task.name} → no deps (parallel-safe)`);
+  }
+
+  if (depResult.validation.orphanWarnings.length > 0) {
+    lines.push("", "Warnings:");
+    for (const w of depResult.validation.orphanWarnings) {
+      lines.push(`  ⚠ ${w}`);
+    }
+  }
+
+  lines.push("", "Present this graph to the user and confirm before proceeding.",
+    "If the user wants to adjust dependencies, update the graph accordingly.",
+    "</parallel-dependency-graph>");
+  return lines.join("\n");
 }
 ```
 

@@ -197,13 +197,32 @@ Add a 4th execution option to `vendor/prompts/execution-options.md`:
    Skill: `super-beads:dispatch-parallel-bead-agents`.
 ```
 
-When the user chooses this option, the handoff hook:
+When the user chooses this option, the handoff hook runs a two-phase process:
 
-1. Runs the enhanced converter (with dependency analysis) instead of the basic chunk-based converter.
-2. Injects a context message referencing the `dispatch-parallel-bead-agents` skill.
-3. Includes the epic ID, task count, and dependency graph summary.
+**Phase 1: Dependency inference and confirmation**
 
-The existing beads-driven option (option 3) continues to use the chunk-based converter.
+1. Parse the plan and run the layered dependency analysis (explicit + file overlap + chunk fallback).
+2. Inject a dependency graph summary for the user/agent to review:
+   ```
+   Inferred dependency graph for parallel execution:
+     Task 1: no deps (parallel-safe)
+     Task 2: no deps (parallel-safe)
+     Task 4 → Task 1 (file overlap: src/auth/types.ts)
+     Task 5 → Task 1, Task 2 (explicit)
+     Task 6 → Task 2 (file overlap: src/db/schema.ts)
+     Task 3: no deps from analysis → chunk fallback (depends on all of Chunk 1)
+   Max parallelism: 3 lanes in first wave
+   Confirm this graph? (or adjust before proceeding)
+   ```
+3. Wait for user confirmation. If the user adjusts dependencies, update the graph.
+
+**Phase 2: Bead creation**
+
+4. Create the epic and child task issues in beads using the confirmed dependency graph.
+5. Inject a context message referencing the `dispatch-parallel-bead-agents` skill.
+6. Include the epic ID, task count, and confirmed dependency summary.
+
+The existing beads-driven option (option 3) continues to use the chunk-based converter unchanged.
 
 ### Task Spec Provisioning
 
