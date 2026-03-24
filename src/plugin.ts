@@ -102,6 +102,7 @@ export const SuperBeadsPlugin: Plugin = async ({ client, $ }) => {
 
   // Load skill content for config registration
   const skillContent = await loadSkillTemplate("beads-driven-development");
+  const parallelSkillContent = await loadSkillTemplate("dispatch-parallel-bead-agents");
 
   // Create the handoff hook
   const handoffHook = createHandoffHook(client, $, bdAvailable);
@@ -110,17 +111,25 @@ export const SuperBeadsPlugin: Plugin = async ({ client, $ }) => {
     "chat.message": handoffHook,
 
     config: async (config) => {
-      // Register the bundled skill as a manual command alias
+      const commands: Record<string, { template: string; description?: string }> = {
+        ...config.command,
+      };
+
       if (skillContent) {
-        config.command = {
-          ...config.command,
-          "super-beads:execute": {
-            description:
-              "Manual alias for super-beads:beads-driven-development",
-            template: skillContent,
-          },
+        commands["super-beads:execute"] = {
+          description: "Execute a plan using beads-driven development (bd ready loop + subagent dispatch)",
+          template: skillContent,
         };
       }
+
+      if (parallelSkillContent) {
+        commands["super-beads:parallel-execute"] = {
+          description: "Execute a plan using parallel beads-driven development (DAG worktrees + parallel lanes)",
+          template: parallelSkillContent,
+        };
+      }
+
+      config.command = commands;
     },
   };
 };
