@@ -56,9 +56,9 @@ flowchart TD
     EPIC_CLOSE --> WRAPUP["Cleanup worktrees + branches\nInvoke finishing-a-development-branch"]
 ```
 
-Key difference from wave-based model: **the loop doesn't wait for all lanes to finish before dispatching new ones.** As soon as a lane completes and frees a slot, `bd ready` is checked for newly unblocked tasks. This is a streaming pool model with MAX_LANES concurrent workers.
+**Execution semantics:** In current tooling (Claude Code, OpenCode), parallel Task calls return results as a batch — the orchestrator receives all results when the last lane completes. This means the effective behavior is batch-based slot-filling: dispatch up to 3 lanes → wait for all to complete → check `bd ready` for newly unblocked tasks → refill all free slots → repeat. If the platform gains incremental task completion detection in the future, the loop naturally upgrades to true streaming (dispatch new lanes as soon as individual slots free up). The algorithm is correct under both semantics.
 
-Graceful degradation: when only 1 task is ready and no parallel slots are needed, skip worktree overhead and run in-place (same as sequential beads-driven-development).
+Graceful degradation: when only 1 task is ready and no parallel slots are needed, skip worktree overhead and run in-place (same as sequential beads-driven-development). If execution starts with 1 task in-place and later 2+ tasks become ready, commit the in-place work and create a lane branch from it before branching parallel worktrees.
 
 ### DAG-Based Worktree Branching
 
@@ -122,18 +122,18 @@ flowchart LR
    - Since dependent branches already include their deps' changes, git's 3-way merge resolves cleanly: the common ancestor is the branch point, and only the task's own changes are new.
 3. Run final integration review on the full diff (integration vs HEAD).
 4. If issues found, fix and re-review (max 3 iterations, then escalate).
-5. Fast-forward main to integration (or merge if main has diverged).
+5. Fast-forward main to integration. If main has diverged (another agent or user pushed during execution), merge integration into main — conflicts here are against external changes unrelated to inter-task interactions. Treat as a distinct failure mode: escalate immediately to the user since the resolution requires understanding what changed externally.
 6. Cleanup: remove all worktrees, lane branches, and temp-base branches.
 
 ### Enhanced Plan-to-Beads Converter
 
 The existing converter uses coarse chunk-based dependencies. For parallel execution, fine-grained per-task dependencies are needed so `bd ready` can release tasks at the earliest possible moment.
 
-**Dependency resolution priority:**
+**Dependency resolution layers (additive, not exclusive):**
 
-1. **Explicit plan annotations** (highest priority, most accurate)
-2. **File-based overlap inference** (when no explicit annotation)
-3. **Chunk ordering** (fallback — conservative but safe)
+1. **Explicit plan annotations** (primary edges, most accurate)
+2. **File-based overlap inference** (always runs as safety net, adds edges even when explicit deps exist)
+3. **Chunk ordering** (fallback for tasks with no explicit deps AND no file overlap)
 
 #### 1. Explicit Plan Annotations
 
@@ -153,11 +153,12 @@ The `writing-plans` skill should be made aware of this format so it produces dep
 
 #### 2. File-Based Overlap Inference
 
-When a task has no explicit `Depends on:` field, the converter analyzes `Files:` sections:
+The converter **always** analyzes `Files:` sections, even when explicit deps exist. This catches missing edges:
 
 - Extract file paths from each task's `Files:` section.
 - If task Y lists a file that task X also lists, and X has a lower task number, create a dependency edge: Y depends on X.
 - If multiple tasks share files, the one with the lowest task number is treated as the "producer" and all others depend on it.
+- Edges from file overlap are added alongside explicit deps (union, not replacement). Duplicate edges are harmless.
 
 **Limitations:** File overlap misses non-file dependencies (shared types, API contracts, runtime behavior). But combined with chunk ordering as fallback, it errs on the side of safety.
 
@@ -223,8 +224,8 @@ The lane prompt provides:
 
 **NEEDS_CONTEXT handling within lanes:** When the implementer phase encounters ambiguity:
 - **Attempt 1-2:** The lane subagent attempts to self-resolve by reading relevant source files, tests, and documentation in the codebase. It has full file system access within its worktree and should use it.
-- **Attempt 3:** If still unresolved, the lane returns NEEDS_CONTEXT to the orchestrator with a description of what it needs.
-- The orchestrator provides the requested context and re-dispatches the lane (resuming the same task, not starting over).
+- **Attempt 3:** If still unresolved, the lane returns NEEDS_CONTEXT to the orchestrator with: the description of what it needs, the pipeline stage reached (implement / spec-review / code-quality-review), and a summary of work completed so far.
+- The orchestrator re-dispatches the lane with: the requested context, the previous lane's status report, the pipeline stage to resume from, and a note that the worktree already contains partial work. The new lane agent inspects the worktree state before continuing.
 - If NEEDS_CONTEXT returns 3 times from the orchestrator level, the lane is marked FAILED and escalated to the user.
 
 The lane subagent returns a structured report:
@@ -244,9 +245,12 @@ Every state transition updates both beads and TodoWrite:
 |---|---|---|
 | Task dispatched to lane | `bd update <id> --claim` | Mark in_progress |
 | Lane returns BLOCKED | `bd update <id> --status blocked` | Mark pending + reason |
+| Lane returns FAILED | Bead stays `in_progress` (user decides next step) | Mark pending + "FAILED: [reason]" |
 | Lane passes all reviews | `bd close <id>` | Mark completed |
 | All tasks closed | (proceed to final merge) | All completed |
 | Final merge + review passes | `bd close <epic-id>` | (all already completed) |
+
+**FAILED task re-entry:** When the user resolves a FAILED task (provides missing context, clarifies requirements, etc.), the orchestrator re-dispatches the lane. The bead is already `in_progress` so no state change needed. If the user wants to skip the task, they close the bead manually (`bd close <id> --reason "skipped"`).
 
 If beads and TodoWrite disagree, beads wins. TodoWrite re-syncs from `bd list` periodically.
 
@@ -273,8 +277,9 @@ flowchart TD
 
 Additionally:
 - Verify the worktree directory is set up (following using-git-worktrees conventions).
-- Check for any stale lane worktrees/branches from a previous interrupted session and clean them up.
+- **Branch recovery:** Completed task branches (`lane/<bead-id>` and `temp-base/<bead-id>`) are part of the DAG backbone — they MUST be preserved until the final merge. Only clean up worktrees and branches for tasks whose beads are still `open` or `in_progress` (these are incomplete/abandoned and safe to remove). Never delete a branch for a `closed` bead.
 - Build the dependency graph from beads (`bd dep tree <epic-id>`) to understand branching requirements.
+- If a completed task's lane branch is missing (manual deletion or corruption), the task must be re-executed: reopen the bead (`bd reopen <id>`), which will re-enter it into `bd ready` when its deps are satisfied.
 
 ## Error Handling
 
