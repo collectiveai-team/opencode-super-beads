@@ -4,6 +4,10 @@
 **Status:** Draft
 **Approach:** New standalone skill alongside existing sequential beads-driven-development
 
+## Terminology
+
+**Base branch:** The branch that is checked out when execution starts — typically a feature branch (e.g., `feature/auth`, `fix/parser-bug`), almost never literally `main`. All references to "base branch" in this spec mean this starting branch. Lane branches diverge from it and merge back into it at the end.
+
 ## Problem
 
 beads-driven-development processes tasks one at a time: pick a task, implement, spec review, code quality review, close, repeat. When `bd ready` returns multiple independent tasks, this leaves throughput on the table. The beads dependency graph already identifies which tasks can safely run concurrently.
@@ -16,8 +20,8 @@ Additionally, the current chunk-based dependency model (all tasks in chunk N+1 d
 
 1. **Review strategy:** Full pipeline per agent. Each parallel lane runs implement → spec review → code quality review independently.
 2. **Isolation:** Each lane gets its own git worktree and branch. No shared working directory, no concurrent git operations on the same index.
-3. **Branching model:** DAG-based. Each task's worktree branches from the merge of its specific dependencies' branches — not from main or an integration branch. Maximum parallelism: a task starts as soon as its actual dependencies complete.
-4. **Main branch protection:** Main is untouched during execution. All work accumulates in lane branches. A single final merge into main happens only after all tasks complete and pass review.
+3. **Branching model:** DAG-based. Each task's worktree branches from the merge of its specific dependencies' branches — not from the base branch or an integration branch. Maximum parallelism: a task starts as soon as its actual dependencies complete.
+4. **Base branch protection:** The base branch is untouched during execution. All work accumulates in lane branches. A single final merge back into the base branch happens only after all tasks complete and pass review.
 5. **Parallelism limit:** Fixed cap of 3 concurrent lanes.
 6. **Fine-grained dependencies:** The plan-to-beads converter produces per-task dependency edges (explicit annotations, file overlap inference, chunk ordering as fallback) so `bd ready` returns tasks at the earliest possible moment.
 
@@ -51,8 +55,8 @@ flowchart TD
 
     COMPLETION["All tasks closed"] --> FINAL_MERGE["Topological merge\nall branches → integration branch\n(from HEAD)"]
     FINAL_MERGE --> FINAL_REVIEW["Final integration review\n+ full code review"]
-    FINAL_REVIEW --> MERGE_MAIN["Merge integration → main"]
-    MERGE_MAIN --> EPIC_CLOSE["bd close <epic-id>"]
+    FINAL_REVIEW --> MERGE_BASE["Merge integration\n→ base branch"]
+    MERGE_BASE --> EPIC_CLOSE["bd close <epic-id>"]
     EPIC_CLOSE --> WRAPUP["Cleanup worktrees + branches\nInvoke finishing-a-development-branch"]
 ```
 
@@ -62,11 +66,11 @@ Graceful degradation: when only 1 task is ready and no parallel slots are needed
 
 ### DAG-Based Worktree Branching
 
-Each task's worktree branches from the state that includes all of its dependencies' completed work. Main is never touched during execution.
+Each task's worktree branches from the state that includes all of its dependencies' completed work. The base branch is never touched during execution.
 
 ```mermaid
 flowchart TD
-    HEAD["HEAD (main)\nunchanged during execution"] --> A["lane/A\n(no deps → from HEAD)"]
+    HEAD["HEAD (base branch)\nunchanged during execution"] --> A["lane/A\n(no deps → from HEAD)"]
     HEAD --> B["lane/B\n(no deps → from HEAD)"]
     HEAD --> C["lane/C\n(no deps → from HEAD)"]
 
@@ -84,7 +88,7 @@ flowchart TD
 
 | Dependencies | Branch from |
 |---|---|
-| No deps | HEAD (main) |
+| No deps | HEAD of base branch |
 | 1 dep | That dep's completed lane branch directly |
 | N deps | Temporary merge branch of all dep lane branches |
 
@@ -100,13 +104,13 @@ git worktree add <worktree-dir>/lane-E -b lane/E temp-base/E
 
 **If the dependency merge conflicts:** Dispatch a conflict resolution agent. The conflict is between two completed, reviewed tasks — the agent has both task specs and the conflict markers. If unresolvable after 3 attempts, escalate to user. This is rare: tasks with conflicting deps usually indicate a dependency edge is missing.
 
-### Final Merge to Main
+### Final Merge to Base Branch
 
-After all tasks complete, merge everything into main via an integration branch:
+After all tasks complete, merge everything back into the base branch via an integration branch:
 
 ```mermaid
 flowchart LR
-    HEAD["HEAD (main)"] --> INT["integration branch"]
+    HEAD["HEAD (base branch)"] --> INT["integration branch"]
     INT --> M_A["merge lane/A"]
     M_A --> M_B["merge lane/B"]
     M_B --> M_C["merge lane/C"]
@@ -114,7 +118,7 @@ flowchart LR
     M_D --> M_E["merge lane/E"]
     M_E --> M_F["merge lane/F"]
     M_F --> REVIEW["Final review"]
-    REVIEW --> MAIN["Fast-forward\nmain → integration"]
+    REVIEW --> BASE["Fast-forward\nbase branch → integration"]
 ```
 
 1. Create an integration branch from HEAD.
@@ -122,7 +126,7 @@ flowchart LR
    - Since dependent branches already include their deps' changes, git's 3-way merge resolves cleanly: the common ancestor is the branch point, and only the task's own changes are new.
 3. Run final integration review on the full diff (integration vs HEAD).
 4. If issues found, fix and re-review (max 3 iterations, then escalate).
-5. Fast-forward main to integration. If main has diverged (another agent or user pushed during execution), merge integration into main — conflicts here are against external changes unrelated to inter-task interactions. Treat as a distinct failure mode: escalate immediately to the user since the resolution requires understanding what changed externally.
+5. Fast-forward the base branch to integration. If the base branch has diverged (another agent or user pushed during execution), merge integration into the base branch — conflicts here are against external changes unrelated to inter-task interactions. Treat as a distinct failure mode: escalate immediately to the user since the resolution requires understanding what changed externally.
 6. Cleanup: remove all worktrees, lane branches, and temp-base branches.
 
 ### Enhanced Plan-to-Beads Converter
@@ -189,7 +193,7 @@ Add a 4th execution option to `vendor/prompts/execution-options.md`:
    dependency analysis. Dispatches up to 3 tasks in parallel, each in its
    own git worktree. Tasks start as soon as their specific dependencies
    complete. Uses DAG-based branching for isolation, with a single final
-   merge to main after all tasks pass review.
+   merge to the base branch after all tasks pass review.
    Skill: `super-beads:dispatch-parallel-bead-agents`.
 ```
 
@@ -298,7 +302,7 @@ Additionally:
 ## Red Flags
 
 **Never:**
-- Merge anything into main during execution (only at the very end).
+- Merge anything into the base branch during execution (only at the very end).
 - Skip reviews (spec compliance OR code quality) in any lane.
 - Skip the final integration review.
 - Proceed with unfixed merge or integration issues.
@@ -306,8 +310,8 @@ Additionally:
 - Make subagents read the plan file (provide full text instead).
 - Skip re-review after implementer fixes within a lane.
 - Start code quality review before spec compliance passes within a lane.
-- Create a task's worktree from HEAD when it has dependencies (must branch from dependency state).
-- Run lane subagents in the main worktree when parallel lanes are active.
+- Create a task's worktree from the base branch HEAD when it has dependencies (must branch from dependency state).
+- Run lane subagents in the base branch worktree when parallel lanes are active.
 - Skip dependency cycle validation during conversion.
 
 ## Relationship to Existing Skills
