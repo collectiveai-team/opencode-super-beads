@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SKILL_NAMESPACE = "super-beads";
-const BUNDLED_SKILLS = ["beads-driven-development"] as const;
+const BUNDLED_SKILLS = ["beads-driven-development", "dispatch-parallel-bead-agents"] as const;
 
 function getProjectRoot(): string {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
